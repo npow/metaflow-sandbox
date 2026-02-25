@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import platform
 import sys
 from typing import Any
 from typing import ClassVar
@@ -38,6 +39,13 @@ _BACKEND_RUNTIME_PYPI_PINS = {
 _SANDBOX_RUNTIME_PYPI_PINS = {
     "requests": ">=2.21.0",
 }
+
+
+def _default_target_platform() -> str:
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64"):
+        return "linux-aarch64"
+    return "linux-64"
 
 
 class SandboxException(MetaflowException):
@@ -64,7 +72,9 @@ class SandboxDecorator(StepDecorator):
         "env": {},
     }
     supports_conda_environment = True
-    target_platform = "linux-64"
+    target_platform = os.environ.get(
+        "METAFLOW_SANDBOX_TARGET_PLATFORM", _default_target_platform()
+    )
 
     # Class-level code-package state (shared across all instances,
     # uploaded once per flow run — same pattern as BatchDecorator).
