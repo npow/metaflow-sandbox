@@ -105,6 +105,12 @@ class SandboxExecutor:
         init_cmds = self._environment.get_package_commands(
             code_package_url, datastore_type, code_package_metadata
         )
+        # Avoid creating/running under a directory literally named "metaflow",
+        # which can shadow the installed metaflow package in Python import path.
+        init_cmds = [
+            cmd.replace("mkdir metaflow && cd metaflow", "mkdir mf_sandbox && cd mf_sandbox")
+            for cmd in init_cmds
+        ]
         init_expr = " && ".join(init_cmds)
         step_expr = bash_capture_logs(
             " && ".join(
@@ -224,6 +230,63 @@ class SandboxExecutor:
 
         self._sandbox_id = self._backend.create(config)
 
+        # Preflight inside sandbox: ensure Metaflow runtime deps are installed
+        # and patch S3 handling for R2 responses that omit ContentType/Metadata.
+        preflight = """python - <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+subprocess.check_call(
+    [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-qqq",
+        "--no-compile",
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "metaflow",
+        "boto3",
+        "requests",
+    ]
+)
+
+import metaflow
+
+root = Path(metaflow.__file__).resolve().parent
+files = (
+    root / "plugins" / "datatools" / "s3" / "s3.py",
+    root / "plugins" / "datatools" / "s3" / "s3op.py",
+)
+replacements = (
+    ('resp["ContentType"]', 'resp.get("ContentType")'),
+    ('resp["Metadata"]', 'resp.get("Metadata", {})'),
+    ('head["ContentType"]', 'head.get("ContentType")'),
+    ('head["Metadata"]', 'head.get("Metadata", {})'),
+)
+for file_path in files:
+    if not file_path.exists():
+        continue
+    text = file_path.read_text()
+    for old, new in replacements:
+        text = text.replace(old, new)
+    file_path.write_text(text)
+
+PY"""
+        preflight_result = self._backend.exec_script(
+            self._sandbox_id,
+            preflight,
+            timeout=min(timeout, 180),
+        )
+        if preflight_result.exit_code != 0:
+            raise SandboxException(
+                "Sandbox preflight failed.\n"
+                f"stdout: {preflight_result.stdout}\n"
+                f"stderr: {preflight_result.stderr}"
+            )
+
         # Inject sandbox ID into the script — we can't know the ID
         # before create(), so we prepend an export to the script.
         cmd_str = (
@@ -238,6 +301,8 @@ class SandboxExecutor:
 
     def cleanup(self) -> None:
         """Destroy the sandbox if it exists. Best-effort, never raises."""
+        if os.environ.get("METAFLOW_SANDBOX_DEBUG_KEEP") == "1":
+            return
         if self._sandbox_id and self._backend:
             with contextlib.suppress(Exception):
                 self._backend.destroy(self._sandbox_id)

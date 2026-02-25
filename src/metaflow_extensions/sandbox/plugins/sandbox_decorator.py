@@ -31,6 +31,13 @@ from metaflow.decorators import StepDecorator
 from metaflow.exception import MetaflowException
 
 _DEFAULT_BACKEND = os.environ.get("METAFLOW_SANDBOX_BACKEND", "daytona")
+_BACKEND_RUNTIME_PYPI_PINS = {
+    "daytona": ("daytona", ">=0.1"),
+    "e2b": ("e2b-code-interpreter", ">=1.0"),
+}
+_SANDBOX_RUNTIME_PYPI_PINS = {
+    "requests": ">=2.21.0",
+}
 
 
 class SandboxException(MetaflowException):
@@ -56,6 +63,8 @@ class SandboxDecorator(StepDecorator):
         "executable": None,
         "env": {},
     }
+    supports_conda_environment = True
+    target_platform = "linux-64"
 
     # Class-level code-package state (shared across all instances,
     # uploaded once per flow run — same pattern as BatchDecorator).
@@ -78,6 +87,33 @@ class SandboxDecorator(StepDecorator):
         self.flow_datastore = flow_datastore
         self.environment = environment
         self.logger = logger
+
+        conda_deco = next((d for d in decorators if d.name == "conda"), None)
+        pypi_deco = next((d for d in decorators if d.name == "pypi"), None)
+
+        # If a step uses @pypi and runs in a sandbox backend, ensure the backend SDK
+        # is part of the resolved PyPI environment for that step.
+        runtime_pin = _BACKEND_RUNTIME_PYPI_PINS.get(self._backend_name)
+        if runtime_pin and pypi_deco is not None:
+            for package_name, version_spec in _SANDBOX_RUNTIME_PYPI_PINS.items():
+                pypi_deco.attributes.setdefault("packages", {}).setdefault(
+                    package_name, version_spec
+                )
+            package_name, version_spec = runtime_pin
+            pypi_deco.attributes.setdefault("packages", {}).setdefault(
+                package_name, version_spec
+            )
+        elif runtime_pin and conda_deco is not None:
+            # Netflix @conda supports pip_packages; inject runtime deps there
+            # so sandbox backends work without requiring users to specify them.
+            for package_name, version_spec in _SANDBOX_RUNTIME_PYPI_PINS.items():
+                conda_deco.attributes.setdefault("pip_packages", {}).setdefault(
+                    package_name, version_spec
+                )
+            package_name, version_spec = runtime_pin
+            conda_deco.attributes.setdefault("pip_packages", {}).setdefault(
+                package_name, version_spec
+            )
 
         # Sandbox backends require a remote datastore — the sandbox
         # cannot access the local filesystem.
@@ -121,6 +157,11 @@ class SandboxDecorator(StepDecorator):
         to local execution (e.g. ``@catch``), so we only redirect while
         ``retry_count <= max_user_code_retries``.
         """
+        # Prevent recursive sandbox-in-sandbox routing when already running
+        # inside a sandbox workload.
+        if os.environ.get("METAFLOW_SANDBOX_WORKLOAD"):
+            return
+
         if retry_count <= max_user_code_retries:
             cli_args.commands = ["sandbox", "step"]
             cli_args.command_args.append(self.package_metadata)

@@ -9,6 +9,7 @@ Docs:    https://www.daytona.io/docs/en/python-sdk/
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from metaflow_extensions.sandbox.plugins.backend import ExecResult
@@ -66,8 +67,10 @@ class DaytonaBackend(SandboxBackend):
         timeout: int = 300,
     ) -> ExecResult:
         sandbox = self._get_sandbox(sandbox_id)
-        command_str = " ".join(cmd)
-        response = sandbox.process.exec(command_str, cwd=cwd, timeout=timeout)
+        command_str = shlex.join(cmd)
+        response = sandbox.process.exec(
+            f"bash -lc {shlex.quote(command_str)}", cwd=cwd, timeout=timeout
+        )
         # ExecuteResponse has exit_code: int and result: str (combined output)
         return ExecResult(
             exit_code=response.exit_code,
@@ -95,13 +98,13 @@ class DaytonaBackend(SandboxBackend):
     ) -> ExecResult:
         """Run a bash script directly via Daytona's shell execution.
 
-        Daytona's ``process.exec()`` already passes the string through a
-        shell, so we send the script directly instead of wrapping it in
-        ``["bash", "-c", ...]`` which breaks due to naive space-joining
-        in :meth:`exec`.
+        Metaflow generates a bash script (uses bash-specific redirections),
+        so execute under ``bash -lc`` explicitly.
         """
         sandbox = self._get_sandbox(sandbox_id)
-        response = sandbox.process.exec(script, timeout=timeout)
+        response = sandbox.process.exec(
+            f"bash -lc {shlex.quote(script)}", timeout=timeout
+        )
         return ExecResult(
             exit_code=response.exit_code,
             stdout=response.result or "",
