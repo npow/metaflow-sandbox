@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "metaflow-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run Metaflow steps in isolated cloud sandboxes — instant container spinup via Daytona, E2B, or custom backends"
 readme = "README.md"
 license = "Apache-2.0"
