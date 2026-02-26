@@ -149,7 +149,12 @@ def step(
     executable = ctx.obj.environment.executable(step_name, executable)
     entrypoint = f"{executable} -u {os.path.basename(sys.argv[0])}"
 
-    top_args = " ".join(util.dict_to_cli_options(ctx.parent.parent.params))
+    top_params = dict(ctx.parent.parent.params)
+    # Remote sandboxes may not have egress to the metadata service.
+    # Force local metadata in-sandbox and replay it from the launcher process.
+    if ctx.obj.metadata.TYPE == "service":
+        top_params["metadata"] = "local"
+    top_args = " ".join(util.dict_to_cli_options(top_params))
 
     # Handle long input_paths by splitting into env vars
     input_paths = kwargs.get("input_paths")

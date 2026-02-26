@@ -36,3 +36,9 @@ def test_fallback_to_metaflow_namespaced_backend_keys() -> None:
     source = CLI_FILE.read_text()
     assert 'os.environ.get("METAFLOW_DAYTONA_API_KEY", "")' in source
     assert 'os.environ.get("METAFLOW_E2B_API_KEY", "")' in source
+
+
+def test_forces_local_metadata_inside_service_mode() -> None:
+    source = CLI_FILE.read_text()
+    assert 'if ctx.obj.metadata.TYPE == "service":' in source
+    assert 'top_params["metadata"] = "local"' in source
