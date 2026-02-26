@@ -71,7 +71,7 @@ def _ensure_conda_remote_command_aliases() -> None:
             continue
         current = tuple(getattr(module, "CONDA_REMOTE_COMMANDS", ()))
         merged = tuple(dict.fromkeys([*current, *_SANDBOX_REMOTE_COMMAND_ALIASES]))
-        setattr(module, "CONDA_REMOTE_COMMANDS", merged)
+        module.CONDA_REMOTE_COMMANDS = merged
 
 
 class SandboxException(MetaflowException):

@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 CLI_FILE = (
     Path(__file__).resolve().parents[2]
     / "src"

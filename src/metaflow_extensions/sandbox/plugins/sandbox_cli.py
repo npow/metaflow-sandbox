@@ -41,10 +41,10 @@ def _replay_task_metadata_to_service(ctx, run_id, step_name, task_id):
     metadata_payload = []
     artifact_payload = []
     for path in glob.glob(os.path.join(meta_dir, "sysmeta_*.json")):
-        with open(path, "r") as f:
+        with open(path) as f:
             metadata_payload.append(json.load(f))
     for path in glob.glob(os.path.join(meta_dir, "*_artifact_*.json")):
-        with open(path, "r") as f:
+        with open(path) as f:
             artifact_payload.append(json.load(f))
 
     if not metadata_payload and not artifact_payload:
@@ -198,8 +198,9 @@ def step(
     # Backend auth env vars are needed by sandbox backend SDK constructors
     # in this process (before sandbox env injection happens).
     for key in ("DAYTONA_API_KEY", "DAYTONA_API_URL", "E2B_API_KEY"):
-        if key in env and env[key]:
-            os.environ[key] = env[key]
+        value = env.get(key)
+        if value:
+            os.environ[key] = value
 
     def _sync_metadata():
         if ctx.obj.metadata.TYPE in ("local", "service"):
@@ -215,10 +216,7 @@ def step(
                         ctx, kwargs["run_id"], step_name, kwargs["task_id"]
                     )
                 except Exception as e:
-                    echo(
-                        "Sandbox metadata replay to service failed: %s"
-                        % util.to_unicode(e)
-                    )
+                    echo(f"Sandbox metadata replay to service failed: {util.to_unicode(e)}")
 
     executor = SandboxExecutor(backend, ctx.obj.environment)
     try:
