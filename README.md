@@ -1,7 +1,9 @@
 # metaflow-sandbox
 
 [![CI](https://github.com/npow/metaflow-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/npow/metaflow-sandbox/actions/workflows/ci.yml)
+[![Publish](https://github.com/npow/metaflow-sandbox/actions/workflows/publish.yml/badge.svg)](https://github.com/npow/metaflow-sandbox/actions/workflows/publish.yml)
 [![PyPI version](https://img.shields.io/pypi/v/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
+[![Python](https://img.shields.io/pypi/pyversions/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Run selected Metaflow steps in fast remote sandboxes ([Daytona](https://www.daytona.io) or [E2B](https://e2b.dev)) while keeping normal Metaflow behavior for artifacts, retries, and flow state.
