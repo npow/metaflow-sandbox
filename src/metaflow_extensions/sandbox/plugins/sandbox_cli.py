@@ -9,6 +9,8 @@ Metaflow discovers this via the ``CLIS_DESC`` entry in ``plugins/__init__.py``.
 
 from __future__ import annotations
 
+import glob
+import json
 import os
 import sys
 import traceback
@@ -22,6 +24,51 @@ from metaflow.unbounded_foreach import UBF_CONTROL
 from metaflow.unbounded_foreach import UBF_TASK
 
 from .sandbox_executor import SandboxExecutor
+
+
+def _replay_task_metadata_to_service(ctx, run_id, step_name, task_id):
+    if ctx.obj.metadata.TYPE != "service":
+        return
+
+    from metaflow.plugins.metadata_providers.local import LocalMetadataProvider
+
+    meta_dir = LocalMetadataProvider._get_metadir(
+        ctx.obj.flow.name, run_id, step_name, task_id
+    )
+    if not meta_dir:
+        return
+
+    metadata_payload = []
+    artifact_payload = []
+    for path in glob.glob(os.path.join(meta_dir, "sysmeta_*.json")):
+        with open(path, "r") as f:
+            metadata_payload.append(json.load(f))
+    for path in glob.glob(os.path.join(meta_dir, "*_artifact_*.json")):
+        with open(path, "r") as f:
+            artifact_payload.append(json.load(f))
+
+    if not metadata_payload and not artifact_payload:
+        return
+
+    provider_cls = ctx.obj.metadata.__class__
+    base_url = provider_cls._obj_path(ctx.obj.flow.name, run_id, step_name, task_id)
+
+    # Ensure run/task exists on the service before replaying payloads.
+    ctx.obj.metadata.register_task_id(run_id, step_name, task_id)
+    if metadata_payload:
+        provider_cls._request(
+            ctx.obj.monitor,
+            base_url + "/metadata",
+            "POST",
+            metadata_payload,
+        )
+    if artifact_payload:
+        provider_cls._request(
+            ctx.obj.monitor,
+            base_url + "/artifact",
+            "POST",
+            artifact_payload,
+        )
 
 
 @click.group()
@@ -143,14 +190,35 @@ def step(
             if key:
                 env[key] = value
 
+    if not env.get("DAYTONA_API_KEY"):
+        env["DAYTONA_API_KEY"] = os.environ.get("METAFLOW_DAYTONA_API_KEY", "")
+    if not env.get("E2B_API_KEY"):
+        env["E2B_API_KEY"] = os.environ.get("METAFLOW_E2B_API_KEY", "")
+
+    # Backend auth env vars are needed by sandbox backend SDK constructors
+    # in this process (before sandbox env injection happens).
+    for key in ("DAYTONA_API_KEY", "DAYTONA_API_URL", "E2B_API_KEY"):
+        if key in env and env[key]:
+            os.environ[key] = env[key]
+
     def _sync_metadata():
-        if ctx.obj.metadata.TYPE == "local":
+        if ctx.obj.metadata.TYPE in ("local", "service"):
             sync_local_metadata_from_datastore(
                 DATASTORE_LOCAL_DIR,
                 ctx.obj.flow_datastore.get_task_datastore(
                     kwargs["run_id"], step_name, kwargs["task_id"]
                 ),
             )
+            if ctx.obj.metadata.TYPE == "service":
+                try:
+                    _replay_task_metadata_to_service(
+                        ctx, kwargs["run_id"], step_name, kwargs["task_id"]
+                    )
+                except Exception as e:
+                    echo(
+                        "Sandbox metadata replay to service failed: %s"
+                        % util.to_unicode(e)
+                    )
 
     executor = SandboxExecutor(backend, ctx.obj.environment)
     try:

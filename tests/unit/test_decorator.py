@@ -108,6 +108,14 @@ class TestDecoratorCliRedirect:
         assert "self.package_sha" in source
         assert "self.package_url" in source
 
+    def test_source_preserves_backend_auth_env_vars(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "_BACKEND_AUTH_ENV_VARS" in source
+        assert "DAYTONA_API_KEY" in source
+        assert "E2B_API_KEY" in source
+        assert "METAFLOW_DAYTONA_API_KEY" in source
+        assert "METAFLOW_E2B_API_KEY" in source
+
 
 class TestDatastoreValidation:
     """Verify that step_init rejects local datastore."""

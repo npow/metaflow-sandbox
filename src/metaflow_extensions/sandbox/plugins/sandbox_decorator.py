@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import platform
 import sys
+from importlib import import_module
 from typing import Any
 from typing import ClassVar
 
@@ -39,6 +40,15 @@ _BACKEND_RUNTIME_PYPI_PINS = {
 _SANDBOX_RUNTIME_PYPI_PINS = {
     "requests": ">=2.21.0",
 }
+_SANDBOX_REMOTE_COMMAND_ALIASES = ("sandbox", "daytona", "e2b")
+_BACKEND_AUTH_ENV_VARS = ("DAYTONA_API_KEY", "DAYTONA_API_URL", "E2B_API_KEY")
+_INITIAL_BACKEND_AUTH_ENV = {
+    k: v for k, v in ((var, os.environ.get(var)) for var in _BACKEND_AUTH_ENV_VARS) if v
+}
+_BACKEND_AUTH_ALIAS_ENV = {
+    "DAYTONA_API_KEY": "METAFLOW_DAYTONA_API_KEY",
+    "E2B_API_KEY": "METAFLOW_E2B_API_KEY",
+}
 
 
 def _default_target_platform() -> str:
@@ -46,6 +56,22 @@ def _default_target_platform() -> str:
     if machine in ("aarch64", "arm64"):
         return "linux-aarch64"
     return "linux-64"
+
+
+def _ensure_conda_remote_command_aliases() -> None:
+    """Ensure nflxext conda remote-command checks include sandbox backends."""
+    module_names = (
+        "metaflow_extensions.netflix_ext.plugins.conda.conda_environment",
+        "metaflow_extensions.netflix_ext.plugins.conda.conda_step_decorator",
+    )
+    for module_name in module_names:
+        try:
+            module = import_module(module_name)
+        except Exception:
+            continue
+        current = tuple(getattr(module, "CONDA_REMOTE_COMMANDS", ()))
+        merged = tuple(dict.fromkeys([*current, *_SANDBOX_REMOTE_COMMAND_ALIASES]))
+        setattr(module, "CONDA_REMOTE_COMMANDS", merged)
 
 
 class SandboxException(MetaflowException):
@@ -92,11 +118,19 @@ class SandboxDecorator(StepDecorator):
         flow_datastore: Any,
         logger: Any,
     ) -> None:
+        _ensure_conda_remote_command_aliases()
+
         self._backend_name = self.attributes.get("backend") or _DEFAULT_BACKEND
         self._step_name = step_name
         self.flow_datastore = flow_datastore
         self.environment = environment
         self.logger = logger
+        self.attributes.setdefault("env", {})
+
+        for src, dst in _BACKEND_AUTH_ALIAS_ENV.items():
+            val = os.environ.get(src) or _INITIAL_BACKEND_AUTH_ENV.get(src)
+            if val and not os.environ.get(dst):
+                os.environ[dst] = val
 
         conda_deco = next((d for d in decorators if d.name == "conda"), None)
         pypi_deco = next((d for d in decorators if d.name == "pypi"), None)
@@ -124,6 +158,13 @@ class SandboxDecorator(StepDecorator):
             conda_deco.attributes.setdefault("pip_packages", {}).setdefault(
                 package_name, version_spec
             )
+
+        # Preserve backend auth env vars through step-runtime transitions.
+        # These are consumed by sandbox_cli *before* sandbox env injection.
+        for var in _BACKEND_AUTH_ENV_VARS:
+            val = os.environ.get(var)
+            if val:
+                self.attributes["env"].setdefault(var, val)
 
         # Sandbox backends require a remote datastore — the sandbox
         # cannot access the local filesystem.
@@ -184,7 +225,17 @@ class SandboxDecorator(StepDecorator):
                 {k: v for k, v in self.attributes.items() if k not in _skip_keys}
             )
             # Serialize user env vars as repeated --env-var KEY=VALUE
-            user_env = self.attributes.get("env") or {}
+            user_env = dict(self.attributes.get("env") or {})
+            for var in _BACKEND_AUTH_ENV_VARS:
+                val = os.environ.get(var) or _INITIAL_BACKEND_AUTH_ENV.get(var)
+                if val:
+                    user_env.setdefault(var, val)
+            for src, dst in _BACKEND_AUTH_ALIAS_ENV.items():
+                val = os.environ.get(dst) or (
+                    os.environ.get(src) or _INITIAL_BACKEND_AUTH_ENV.get(src)
+                )
+                if val:
+                    user_env.setdefault(dst, val)
             if user_env:
                 cli_args.command_options["env-var"] = [
                     f"{k}={v}" for k, v in user_env.items()

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from metaflow_extensions.sandbox.plugins.backend import ExecResult
+from metaflow_extensions.sandbox.plugins.backend import Resources
 from metaflow_extensions.sandbox.plugins.backend import SandboxConfig
 
 _daytona_mock = MagicMock()
@@ -45,10 +46,18 @@ class TestDaytonaBackend:
         mock_sandbox.id = "sb-123"
         mock_client.create.return_value = mock_sandbox
 
-        sandbox_id = backend.create(SandboxConfig(image="python:3.11-slim"))
+        sandbox_id = backend.create(
+            SandboxConfig(
+                image="python:3.11-slim",
+                resources=Resources(cpu=2, memory_mb=8192, gpu="1"),
+            )
+        )
 
         assert sandbox_id == "sb-123"
         mock_client.create.assert_called_once()
+        _daytona_mock.Resources.assert_called_once_with(cpu=2, memory=8, gpu=1)
+        kwargs = _daytona_mock.CreateSandboxFromImageParams.call_args.kwargs
+        assert "resources" in kwargs
 
     def test_exec_returns_exec_result(self) -> None:
         backend, _ = _make_backend()
@@ -101,7 +110,7 @@ class TestDaytonaBackend:
         mock_client.delete.assert_not_called()
 
 
-    def test_exec_script_passes_script_directly(self) -> None:
+    def test_exec_script_uploads_and_executes_script_file(self) -> None:
         backend, _ = _make_backend()
 
         mock_sandbox = MagicMock()
@@ -115,11 +124,11 @@ class TestDaytonaBackend:
         result = backend.exec_script("sb-123", script)
 
         assert result.ok
-        mock_sandbox.process.exec.assert_called_once()
-        # exec_script passes the script directly to process.exec
-        # (not wrapped in ["bash", "-c", ...])
-        call_args = mock_sandbox.process.exec.call_args
-        assert call_args[0][0] == script
+        mock_sandbox.fs.upload_file.assert_called_once()
+        # one call to execute script, one best-effort cleanup call
+        assert mock_sandbox.process.exec.call_count == 2
+        first_call = mock_sandbox.process.exec.call_args_list[0]
+        assert first_call[0][0].startswith("bash -lc ")
 
 
 class TestDaytonaImportError:

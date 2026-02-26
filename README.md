@@ -1,39 +1,26 @@
 # metaflow-sandbox
 
-Spin up isolated containers for your Metaflow steps in milliseconds.
+[![CI](https://github.com/npow/metaflow-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/npow/metaflow-sandbox/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Each step gets its own sandbox — a fresh container that starts in <100ms, runs your code, and disappears. Spin up dozens in parallel without waiting for pods to schedule or containers to pull. Think `@batch` but with instant cold starts.
+Run selected Metaflow steps in fast remote sandboxes ([Daytona](https://www.daytona.io) or [E2B](https://e2b.dev)) while keeping normal Metaflow behavior for artifacts, retries, and flow state.
 
-Pluggable backends — currently [Daytona](https://daytona.io) and [E2B](https://e2b.dev), with a simple interface to add your own.
+## Why Use It
 
-```python
-from metaflow import FlowSpec, step
+- ⚡ Speed + scale: launch sandboxes in milliseconds (`<100ms`) and fan out to thousands of containers.
+- 🔒 Isolation: run tool-heavy or untrusted code without polluting the launcher machine.
+- 📦 Dependency management: keep runtime dependencies consistent across local runs, CI, and remote execution.
+- 🧪 Throughput for evals: run many short-lived agent tasks in parallel for benchmark and regression loops.
+- 🔁 Continuity: keep normal step-to-step state and result passing.
 
-class TrainingFlow(FlowSpec):
-
-    @sandbox(cpu=4, memory=8192)
-    @step
-    def train(self):
-        import torch
-        self.model = train_model()
-        self.next(self.end)
-
-    @step
-    def end(self):
-        print(f"Model accuracy: {self.model.accuracy}")
-
-if __name__ == "__main__":
-    TrainingFlow()
-```
-
-`train` runs in a cloud sandbox with 4 CPUs and 8GB RAM. `end` runs locally. Artifacts, metadata, retries, and `@catch` all work exactly like `@batch`.
-
-## Quick start
+## Quick Start (Daytona) 🚀
 
 ```bash
 pip install metaflow-sandbox[daytona]
-export DAYTONA_API_KEY=your-key          # from daytona.io
-export METAFLOW_DEFAULT_DATASTORE=s3     # remote datastore required
+
+export DAYTONA_API_KEY=...
+export METAFLOW_DEFAULT_DATASTORE=s3
 export METAFLOW_DATASTORE_SYSROOT_S3=s3://your-bucket/metaflow
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
@@ -41,57 +28,96 @@ export AWS_SECRET_ACCESS_KEY=...
 python my_flow.py run
 ```
 
-Works with S3, GCS, Azure Blob, or any S3-compatible store (Cloudflare R2, MinIO).
-
-## Backends
-
-| Backend | Install | Cold start | Provider |
-|---------|---------|-----------|----------|
-| [Daytona](https://daytona.io) | `pip install metaflow-sandbox[daytona]` | <100ms | Daytona Cloud |
-| [E2B](https://e2b.dev) | `pip install metaflow-sandbox[e2b]` | ~150ms | E2B Firecracker microVMs |
-
-Use the backend-specific decorator or the generic one:
+Minimal example:
 
 ```python
-@daytona(cpu=2)           # Daytona
-@e2b                      # E2B
-@sandbox(backend="daytona", cpu=4, memory=8192)  # generic
+from metaflow import FlowSpec, step, daytona
+
+class Demo(FlowSpec):
+    @step
+    def start(self):
+        self.msg = "hello"
+        self.next(self.remote)
+
+    @daytona(cpu=1, memory=2048)
+    @step
+    def remote(self):
+        self.msg = self.msg + " from sandbox"
+        self.next(self.end)
+
+    @step
+    def end(self):
+        print(self.msg)
+
+if __name__ == "__main__":
+    Demo()
 ```
 
-## How it works
+## R2 / S3-Compatible Setup ☁️
 
-Same pattern as `@batch` and `@kubernetes` — your code package is uploaded to your datastore, a sandbox is created, the step runs inside it, artifacts are saved back. You get logs, metadata, retries, and `@catch` — everything works the same.
-
-```
-Your laptop                              Sandbox
-──────────                               ───────
-1. Upload code package to S3
-2. Create sandbox (<100ms)        →      3. Download code package
-                                         4. pip install dependencies
-                                         5. Run: python flow.py step train
-                                         6. Save artifacts to S3
-7. Stream logs ←
-8. Destroy sandbox
-```
-
-Cloud credentials are forwarded automatically from your local environment (AWS, GCP, Azure).
-
-## Requirements
-
-- **Remote datastore**: S3, GCS, Azure Blob, or S3-compatible (R2, MinIO). Local datastore won't work — the sandbox can't access your filesystem.
-- **Backend API key**: `DAYTONA_API_KEY` or `E2B_API_KEY`
-- **Cloud credentials**: For the datastore (e.g. `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`)
-
-## Adding a new backend
-
-The backend interface is 5 methods: `create`, `exec`, `upload`, `download`, `destroy`. See [docs/adding-a-backend.md](docs/adding-a-backend.md).
-
-## Development
+For Cloudflare R2, set:
 
 ```bash
-ruff check src/ tests/                          # lint
-pytest tests/unit/ tests/structural/            # tests (no credentials needed)
-pytest tests/integration/ -m integration        # e2e (needs API keys + remote datastore)
+export METAFLOW_S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+# optional for R2:
+export AWS_DEFAULT_REGION=auto
 ```
 
-See [docs/architecture.md](docs/architecture.md) for internals.
+## Dependency Hydration in Sandbox 📦
+
+Use your normal Metaflow decorators:
+
+```python
+@daytona
+@pypi(packages={"pydash": "==8.0.5"})
+@step
+def pypi_step(self):
+    import pydash
+    self.x = pydash.camel_case("hello_world")
+    self.next(self.conda_step)
+
+@daytona
+@conda(libraries={"numpy": "1.26.4"}, python="3.12.12")
+@step
+def conda_step(self):
+    import numpy as np
+    print(self.x, int(np.array([1, 2, 3]).sum()))
+```
+
+## Backends 🔌
+
+- Daytona: `pip install metaflow-sandbox[daytona]`, use `@daytona`
+- E2B: `pip install metaflow-sandbox[e2b]`, use `@e2b`
+- Generic: `@sandbox(backend="daytona", cpu=2, memory=4096)`
+
+## Configuration 🧭
+
+For the full list of decorator parameters, environment variables, defaults, and advanced toggles, see [docs/configuration.md](docs/configuration.md).
+
+## Troubleshooting 🛠️
+
+- Symptom: auth error from backend API
+- Fix: set the right key (`DAYTONA_API_KEY` or `E2B_API_KEY`) in the shell that runs the flow.
+
+- Symptom: `@sandbox`/`@daytona` says remote datastore is required
+- Fix: set `METAFLOW_DEFAULT_DATASTORE` and its remote datastore root.
+
+- Symptom: datastore access errors (`403`, missing objects, endpoint errors)
+- Fix: verify cloud credentials and endpoint config (`METAFLOW_S3_ENDPOINT_URL` for R2/custom S3).
+
+## Development 🧪
+
+```bash
+ruff check src/ tests/
+pytest tests/unit/ tests/structural/
+pytest tests/integration/ -m integration
+```
+
+Architecture details: [docs/architecture.md](docs/architecture.md)  
+Backend interface: [docs/adding-a-backend.md](docs/adding-a-backend.md)
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

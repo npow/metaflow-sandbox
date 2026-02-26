@@ -108,11 +108,43 @@ class TestExecutorEnvVars:
         assert "AWS_ACCESS_KEY_ID" in source
         assert "AWS_SECRET_ACCESS_KEY" in source
         assert "AWS_SESSION_TOKEN" in source
+        assert "DAYTONA_API_KEY" in source
+        assert "E2B_API_KEY" in source
 
     def test_includes_datastore_vars(self) -> None:
         source = EXECUTOR_FILE.read_text()
         assert "METAFLOW_DEFAULT_DATASTORE" in source
         assert "METAFLOW_USER" in source
+        assert "METAFLOW_CONDA" in source
+
+    def test_supports_force_local_metadata_flag(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "proxy_service_metadata = DEFAULT_METADATA == \"service\"" in source
+        assert '"METAFLOW_DEFAULT_METADATA": (' in source
+
+    def test_skips_session_token_for_r2_by_default(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "cloudflarestorage.com" in source
+        assert "METAFLOW_SANDBOX_FORWARD_AWS_SESSION_TOKEN" in source
+        assert "METAFLOW_SANDBOX_R2_WORKER_COUNT" in source
+        assert "METAFLOW_S3_WORKER_COUNT" in source
+
+    def test_stashes_backend_keys_under_metaflow_namespace(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "METAFLOW_DAYTONA_API_KEY" in source
+        assert "METAFLOW_E2B_API_KEY" in source
+
+    def test_auto_stages_micromamba_with_opt_out(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "METAFLOW_SANDBOX_STAGE_MICROMAMBA" in source
+        assert "if stage_cfg in (\"0\", \"false\", \"no\", \"off\")" in source
+        assert "_is_compatible_linux_micromamba" in source
+        assert "_auto_download_micromamba" in source
+        assert "METAFLOW_SANDBOX_AUTO_DOWNLOAD_MICROMAMBA" in source
+        assert "METAFLOW_SANDBOX_MICROMAMBA_CACHE_DIR" in source
+        assert "_elf_arch" in source
+        assert "_target_linux_arch" in source
+        assert "optional" in source
 
 
 class TestExecutorLaunch:
@@ -126,9 +158,22 @@ class TestExecutorLaunch:
         source = EXECUTOR_FILE.read_text()
         assert "self._backend.exec_script" in source
 
+    def test_source_calls_backend_upload(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "self._backend.upload" in source
+
     def test_source_uses_get_backend(self) -> None:
         source = EXECUTOR_FILE.read_text()
         assert "get_backend" in source
+
+    def test_source_supports_staged_uploads(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "METAFLOW_SANDBOX_UPLOADS" in source
+        assert "METAFLOW_SANDBOX_STAGE_MICROMAMBA" in source
+        assert "METAFLOW_SANDBOX_MAX_INFRA_RETRIES" in source
+        assert "METAFLOW_SANDBOX_DEBUG" in source
+        assert "export PATH=" in source
+        assert "_STAGING_BIN_DIR" in source
 
 
 class TestExecutorWait:
