@@ -23,6 +23,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from urllib import request
 
 from metaflow import util
@@ -232,6 +233,7 @@ class SandboxExecutor:
         self._sandbox_id: str | None = None
         self._result: ExecResult | None = None
         self._backend: Any = None
+        self._log_streamed: bool = False
 
     # ------------------------------------------------------------------
     # Command building (mirrors Batch._command)
@@ -523,6 +525,7 @@ class SandboxExecutor:
         gpu: str | None = None,
         timeout: int = 600,
         env: dict[str, str] | None = None,
+        on_log: Callable[[str, str], None] | None = None,
     ) -> None:
         """Create a sandbox and run the step command inside it."""
         self._backend = get_backend(self._backend_name)
@@ -603,10 +606,21 @@ class SandboxExecutor:
                 with open(env_dump_path, "w", encoding="utf-8") as f:
                     json.dump(sandbox_env, f, sort_keys=True, indent=2)
 
-            result = self._backend.exec_script(
+            if on_log is not None:
+                def _on_stdout(line: str) -> None:
+                    on_log(line, "stdout")
+
+                def _on_stderr(line: str) -> None:
+                    on_log(line, "stderr")
+            else:
+                _on_stdout = _on_stderr = None
+
+            result = self._backend.exec_script_streaming(
                 self._sandbox_id,
                 run_cmd,
                 timeout=timeout,
+                on_stdout=_on_stdout,
+                on_stderr=_on_stderr,
             )
             last_result = result
             hard_minus_one = _is_hard_minus_one(result)
@@ -619,6 +633,7 @@ class SandboxExecutor:
         if last_result is None:
             raise SandboxException("Sandbox execution did not produce a result.")
         self._result = last_result
+        self._log_streamed = on_log is not None
 
     def cleanup(self) -> None:
         """Destroy the sandbox if it exists. Best-effort, never raises."""
@@ -642,13 +657,14 @@ class SandboxExecutor:
         if self._result is None:
             raise SandboxException("No result — was launch() called?")
 
-        # Stream stdout to the console
-        if self._result.stdout:
-            for line in self._result.stdout.splitlines():
-                echo(line, stream="stderr")
-        if self._result.stderr:
-            for line in self._result.stderr.splitlines():
-                echo(line, stream="stderr")
+        # Echo buffered output only when streaming didn't already emit it live.
+        if not self._log_streamed:
+            if self._result.stdout:
+                for line in self._result.stdout.splitlines():
+                    echo(line, stream="stderr")
+            if self._result.stderr:
+                for line in self._result.stderr.splitlines():
+                    echo(line, stream="stderr")
 
         exit_code = self._result.exit_code
         sandbox_id = self._sandbox_id

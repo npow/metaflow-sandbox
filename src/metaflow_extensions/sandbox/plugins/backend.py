@@ -14,6 +14,7 @@ from abc import ABC
 from abc import abstractmethod
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -95,3 +96,29 @@ class SandboxBackend(ABC):
         file and sourcing it).
         """
         return self.exec(sandbox_id, ["bash", "-c", script], timeout=timeout)
+
+    def exec_script_streaming(
+        self,
+        sandbox_id: str,
+        script: str,
+        timeout: int = 600,
+        on_stdout: Callable[[str], None] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+    ) -> ExecResult:
+        """Run a bash script with optional streaming log callbacks.
+
+        Default: blocking exec_script, then call callbacks with the full
+        output at the end.  Backends that support live log streaming
+        (e.g. Daytona via session-based async execution) should override
+        this to emit lines incrementally while the script runs.
+
+        ``on_stdout`` / ``on_stderr`` are called once per line (no newline).
+        """
+        result = self.exec_script(sandbox_id, script, timeout)
+        if on_stdout and result.stdout:
+            for line in result.stdout.splitlines():
+                on_stdout(line)
+        if on_stderr and result.stderr:
+            for line in result.stderr.splitlines():
+                on_stderr(line)
+        return result

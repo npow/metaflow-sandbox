@@ -154,9 +154,9 @@ class TestExecutorLaunch:
         source = EXECUTOR_FILE.read_text()
         assert "self._backend.create" in source
 
-    def test_source_calls_backend_exec_script(self) -> None:
+    def test_source_calls_backend_exec_script_streaming(self) -> None:
         source = EXECUTOR_FILE.read_text()
-        assert "self._backend.exec_script" in source
+        assert "self._backend.exec_script_streaming" in source
 
     def test_source_calls_backend_upload(self) -> None:
         source = EXECUTOR_FILE.read_text()

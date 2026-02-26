@@ -223,6 +223,10 @@ def step(
                 except Exception as e:
                     echo(f"Sandbox metadata replay to service failed: {util.to_unicode(e)}")
 
+    def _on_log(line: str, _stream: str) -> None:
+        # Always route to stderr (same stream as non-streaming wait() path).
+        echo(line, stream="stderr")
+
     executor = SandboxExecutor(backend, ctx.obj.environment)
     try:
         executor.launch(
@@ -239,6 +243,7 @@ def step(
             gpu=gpu,
             timeout=timeout,
             env=env,
+            on_log=_on_log,
         )
     except Exception:
         traceback.print_exc()

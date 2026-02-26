@@ -9,16 +9,23 @@ Docs:    https://www.daytona.io/docs/en/python-sdk/
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shlex
 import time
 import uuid
 from math import ceil
 from pathlib import Path
+from typing import Callable
 
 from metaflow_extensions.sandbox.plugins.backend import ExecResult
 from metaflow_extensions.sandbox.plugins.backend import SandboxBackend
 from metaflow_extensions.sandbox.plugins.backend import SandboxConfig
+
+# How often (seconds) to poll for new log lines.  Tune with
+# METAFLOW_SANDBOX_LOG_POLL_INTERVAL (float, default 2.0).
+_DEFAULT_POLL_INTERVAL = 2.0
 
 _INSTALL_HINT = (
     "Daytona SDK not found. Install it with:\n"
@@ -172,6 +179,135 @@ class DaytonaBackend(SandboxBackend):
                 f"bash -lc {shlex.quote(f'rm -f {remote_script}')}",
                 timeout=min(timeout, 30),
             )
+
+    def exec_script_streaming(
+        self,
+        sandbox_id: str,
+        script: str,
+        timeout: int = 600,
+        on_stdout: Callable[[str], None] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+    ) -> ExecResult:
+        """Run the step script via a Daytona session with incremental log polling.
+
+        Uses ``process.execute_session_command(run_async=True)`` so the
+        script starts immediately while we poll ``get_session_command_logs``
+        every ``METAFLOW_SANDBOX_LOG_POLL_INTERVAL`` seconds, emitting new
+        lines through the callbacks in near real-time.
+
+        Falls back to the blocking ``exec_script`` path if no callbacks are
+        requested (e.g. when streaming is disabled by the caller).
+        """
+        if on_stdout is None and on_stderr is None:
+            return self.exec_script(sandbox_id, script, timeout)
+
+        try:
+            from daytona import SessionExecuteRequest
+        except ImportError:
+            raise ImportError(_INSTALL_HINT) from None
+
+        poll_interval = float(
+            os.environ.get("METAFLOW_SANDBOX_LOG_POLL_INTERVAL", str(_DEFAULT_POLL_INTERVAL))
+        )
+
+        sandbox = self._get_sandbox(sandbox_id)
+        session_id = f"mf-{uuid.uuid4().hex}"
+        remote_script = f"/tmp/metaflow-sandbox-{uuid.uuid4().hex}.sh"
+
+        sandbox.fs.upload_file(script.encode("utf-8"), remote_script)
+        command = (
+            f"bash -lc {shlex.quote(f'chmod 700 {remote_script} && bash {remote_script}')}"
+        )
+
+        try:
+            sandbox.process.create_session(session_id)
+            exec_resp = sandbox.process.execute_session_command(
+                session_id,
+                SessionExecuteRequest(command=command, run_async=True),
+                timeout=timeout,
+            )
+            cmd_id = exec_resp.cmd_id
+
+            stdout_offset = 0
+            stderr_offset = 0
+            exit_code: int | None = None
+            last_logs = None
+            deadline = time.monotonic() + timeout
+
+            while time.monotonic() < deadline:
+                time.sleep(poll_interval)
+
+                # Grab a log snapshot; tolerate transient API errors.
+                try:
+                    logs = sandbox.process.get_session_command_logs(session_id, cmd_id)
+                except Exception:
+                    logs = None
+
+                if logs is not None:
+                    last_logs = logs
+                    cur_stdout = getattr(logs, "stdout", None) or ""
+                    cur_stderr = getattr(logs, "stderr", None) or ""
+
+                    if on_stdout and len(cur_stdout) > stdout_offset:
+                        new_chunk = cur_stdout[stdout_offset:]
+                        # Emit only complete lines; hold back any partial trailing line.
+                        lines = new_chunk.split("\n")
+                        complete_lines = lines[:-1]  # last element is partial (or "")
+                        for line in complete_lines:
+                            on_stdout(line)
+                        stdout_offset += len(new_chunk) - len(lines[-1])
+
+                    if on_stderr and len(cur_stderr) > stderr_offset:
+                        new_chunk = cur_stderr[stderr_offset:]
+                        lines = new_chunk.split("\n")
+                        complete_lines = lines[:-1]
+                        for line in complete_lines:
+                            on_stderr(line)
+                        stderr_offset += len(new_chunk) - len(lines[-1])
+
+                # Check whether the command has exited.
+                try:
+                    session = sandbox.process.get_session(session_id)
+                    for cmd_info in getattr(session, "commands", None) or []:
+                        ec = getattr(cmd_info, "exit_code", None)
+                        if ec is not None:
+                            exit_code = ec
+                            break
+                except Exception:
+                    pass
+
+                if exit_code is not None:
+                    break
+
+            # Final log flush — emit any lines buffered after the last poll.
+            try:
+                logs = sandbox.process.get_session_command_logs(session_id, cmd_id)
+                if logs is not None:
+                    last_logs = logs
+                    cur_stdout = getattr(logs, "stdout", None) or ""
+                    cur_stderr = getattr(logs, "stderr", None) or ""
+                    if on_stdout and len(cur_stdout) > stdout_offset:
+                        for line in cur_stdout[stdout_offset:].splitlines():
+                            on_stdout(line)
+                    if on_stderr and len(cur_stderr) > stderr_offset:
+                        for line in cur_stderr[stderr_offset:].splitlines():
+                            on_stderr(line)
+            except Exception:
+                pass
+
+            final_ec = exit_code if exit_code is not None else -1
+            final_stdout = (getattr(last_logs, "stdout", None) or "") if last_logs else ""
+            final_stderr = (getattr(last_logs, "stderr", None) or "") if last_logs else ""
+            return ExecResult(exit_code=final_ec, stdout=final_stdout, stderr=final_stderr)
+
+        finally:
+            with contextlib.suppress(Exception):
+                sandbox.process.delete_session(session_id)
+            with contextlib.suppress(Exception):
+                sandbox.process.exec(
+                    f"bash -lc {shlex.quote(f'rm -f {remote_script}')}",
+                    timeout=30,
+                )
 
     def destroy(self, sandbox_id: str) -> None:
         sandbox = self._sandboxes.pop(sandbox_id, None)
