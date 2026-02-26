@@ -28,7 +28,8 @@ def test_supports_service_replay_from_local_metadata() -> None:
 def test_sets_backend_auth_env_vars_before_launch() -> None:
     source = CLI_FILE.read_text()
     assert 'for key in ("DAYTONA_API_KEY", "DAYTONA_API_URL", "E2B_API_KEY")' in source
-    assert "os.environ[key] = env[key]" in source
+    assert "value = env.get(key)" in source
+    assert "os.environ[key] = value" in source
 
 
 def test_fallback_to_metaflow_namespaced_backend_keys() -> None:
