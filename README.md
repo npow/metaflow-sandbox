@@ -19,7 +19,7 @@ Run selected Metaflow steps in fast remote sandboxes ([Daytona](https://www.dayt
 ## Quick Start (Daytona) 🚀
 
 ```bash
-pip install metaflow-sandbox[daytona]
+pip install metaflow-sandbox[daytona] metaflow-local-service
 
 export DAYTONA_API_KEY=...
 export METAFLOW_DEFAULT_DATASTORE=s3
@@ -27,8 +27,13 @@ export METAFLOW_DATASTORE_SYSROOT_S3=s3://your-bucket/metaflow
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 
-python my_flow.py run
+metaflow-local-service run python my_flow.py run
 ```
+
+`metaflow-local-service` starts a metadata service in the background, sets
+`METAFLOW_DEFAULT_METADATA=service`, and runs your command. Run history, task
+IDs, artifacts, and tags are tracked locally in `.metaflow/` — no Postgres required.
+Stop it when you're done with `metaflow-local-service stop`.
 
 Minimal example:
 
@@ -97,6 +102,45 @@ def conda_step(self):
 ## Configuration 🧭
 
 For the full list of decorator parameters, environment variables, defaults, and advanced toggles, see [docs/configuration.md](docs/configuration.md).
+
+## Metadata tracking 📋
+
+Metaflow has two metadata modes: `local` (files, no HTTP API) and `service`
+(HTTP API, full run tracking). `metaflow-sandbox` works with both, but `service`
+mode gives you the full experience — heartbeats, tag mutation, resume, and
+`metaflow.Run` queries. [`metaflow-local-service`](https://github.com/npow/metaflow-local-service)
+provides that service without a database.
+
+### Daytona (no egress)
+
+Daytona sandboxes can't reach the coordinator's network, so the metadata relay
+goes through S3:
+
+```
+Daytona sandbox                   Your machine
+───────────────                   ─────────────────────────────────
+Step runs with                    metaflow-local-service
+METAFLOW_DEFAULT_METADATA=local   listening on 127.0.0.1
+        │
+        ▼
+.metaflow/ written locally
+        │
+        ▼
+sync to S3  ──────────────────►  pull from S3
+                                        │
+                                        ▼
+                                 replay metadata to
+                                 metaflow-local-service
+```
+
+This relay is handled automatically by `metaflow-sandbox` — no extra code
+needed. `metaflow-local-service` is just the destination on your machine.
+
+### E2B (has egress)
+
+E2B sandboxes have internet access but can't reach your laptop's localhost.
+Rather than setting up a tunnel with authentication, use the same S3 relay as
+Daytona — it works identically and requires no extra infrastructure.
 
 ## Troubleshooting 🛠️
 
