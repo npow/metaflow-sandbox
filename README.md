@@ -193,11 +193,18 @@ On Linux, ensure `/dev/kvm` exists and your user has permission. On macOS, requi
 ```
 Sandbox                           Your machine
 ───────────────                   ─────────────────────────────────
-step runs                         metaflow-local-service
-writes .metaflow/ locally
+Step runs with                    metaflow-local-service
+METAFLOW_DEFAULT_METADATA=local   listening on 127.0.0.1
         │
         ▼
-sync to S3  ──────────────────►  pull from S3 → replay to service
+.metaflow/ written locally
+        │
+        ▼
+sync to S3  ──────────────────►  pull from S3
+                                        │
+                                        ▼
+                                 replay metadata to
+                                 metaflow-local-service
 ```
 
 Architecture details: [docs/architecture.md](docs/architecture.md)
