@@ -15,12 +15,12 @@ from metaflow_extensions.sandbox.plugins.backend import SandboxConfig
 def _make_backend():
     """Create an E2BBackend with a mocked sandbox class, bypassing SDK import."""
     with patch.dict("sys.modules", {"e2b_code_interpreter": MagicMock()}), patch(
-        "metaflow_extensions.sandbox.plugins.backends.e2b._get_sandbox_class",
+        "sandrun.backends.e2b._get_sandbox_class",
     ) as mock_get:
         mock_sandbox_cls = MagicMock()
         mock_get.return_value = mock_sandbox_cls
 
-        from metaflow_extensions.sandbox.plugins.backends.e2b import E2BBackend
+        from sandrun.backends.e2b import E2BBackend
 
         backend = E2BBackend()
     return backend, mock_sandbox_cls

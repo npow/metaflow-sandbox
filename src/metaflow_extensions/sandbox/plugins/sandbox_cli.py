@@ -53,7 +53,6 @@ def _replay_task_metadata_to_service(ctx, run_id, step_name, task_id):
     provider_cls = ctx.obj.metadata.__class__
     base_url = provider_cls._obj_path(ctx.obj.flow.name, run_id, step_name, task_id)
 
-    # Ensure run/task exists on the service before replaying payloads.
     ctx.obj.metadata.register_task_id(run_id, step_name, task_id)
     if metadata_payload:
         provider_cls._request(
@@ -124,6 +123,20 @@ def sandbox():
     default=None,
     type=click.Choice(["none", UBF_CONTROL, UBF_TASK]),
 )
+@click.option(
+    "--code-package-local-path",
+    default=None,
+    help="Local path to the code package tarball for backend-native delivery "
+    "(TarballStager). When provided, the package is uploaded via backend.upload() "
+    "instead of downloaded from the remote datastore URL.",
+)
+@click.option(
+    "--deps-staging-dir",
+    default=None,
+    help="Local path to a pre-prepared dependency staging directory "
+    "(CondaOfflineInstaller). When provided, packages are uploaded via "
+    "backend.upload() and installed offline (no-egress safe).",
+)
 @click.pass_context
 def step(
     ctx,
@@ -139,19 +152,18 @@ def step(
     gpu=None,
     timeout=600,
     env_vars=None,
+    code_package_local_path=None,
+    deps_staging_dir=None,
     **kwargs,
 ):
     def echo(msg, stream="stderr", **kw):
         msg = util.to_unicode(msg)
         ctx.obj.echo_always(msg, err=(stream == "stderr"), **kw)
 
-    # Build the inner step command (same pattern as batch_cli.py)
     executable = ctx.obj.environment.executable(step_name, executable)
     entrypoint = f"{executable} -u {os.path.basename(sys.argv[0])}"
 
     top_params = dict(ctx.parent.parent.params)
-    # Remote sandboxes may not have egress to the metadata service.
-    # Force local metadata in-sandbox and replay it from the launcher process.
     if ctx.obj.metadata.TYPE == "service":
         top_params["metadata"] = "local"
     top_args = " ".join(util.dict_to_cli_options(top_params))
@@ -207,6 +219,30 @@ def step(
         if value:
             os.environ[key] = value
 
+    # ------------------------------------------------------------------
+    # Build stager and installer from CLI args (sandrun integration)
+    # ------------------------------------------------------------------
+
+    stager = None
+    if code_package_local_path and os.path.isfile(code_package_local_path):
+        from sandrun.stager import TarballStager
+
+        stager = TarballStager(code_package_local_path)
+
+    installer = None
+    if deps_staging_dir and os.path.isdir(deps_staging_dir):
+        from sandrun.installer import CondaOfflineInstaller
+
+        try:
+            installer = CondaOfflineInstaller.from_staged(deps_staging_dir)
+        except Exception as e:
+            echo(
+                f"[sandbox] Failed to load dep installer from {deps_staging_dir!r}: {e}. "
+                "Falling back to bootstrap_commands()."
+            )
+
+    # ------------------------------------------------------------------
+
     def _sync_metadata():
         if ctx.obj.metadata.TYPE in ("local", "service"):
             sync_local_metadata_from_datastore(
@@ -224,10 +260,14 @@ def step(
                     echo(f"Sandbox metadata replay to service failed: {util.to_unicode(e)}")
 
     def _on_log(line: str, _stream: str) -> None:
-        # Always route to stderr (same stream as non-streaming wait() path).
         echo(line, stream="stderr")
 
-    executor = SandboxExecutor(backend, ctx.obj.environment)
+    executor = SandboxExecutor(
+        backend,
+        ctx.obj.environment,
+        stager=stager,
+        installer=installer,
+    )
     try:
         executor.launch(
             step_name,
@@ -253,12 +293,8 @@ def step(
     try:
         executor.wait(echo=echo)
     except SystemExit:
-        # wait() calls sys.exit(exit_code) on task failure —
-        # propagate this so the runtime can handle retries.
-        # Don't call _sync_metadata here — finally handles it.
         raise
     except Exception:
-        # Infra-level failure (e.g. SDK crash) — don't retry.
         traceback.print_exc()
         executor.cleanup()
         sys.exit(METAFLOW_EXIT_DISALLOW_RETRY)

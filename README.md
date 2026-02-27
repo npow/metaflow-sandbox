@@ -6,17 +6,80 @@
 [![Python](https://img.shields.io/pypi/pyversions/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Run selected Metaflow steps in fast remote sandboxes ([Daytona](https://www.daytona.io) or [E2B](https://e2b.dev)) while keeping normal Metaflow behavior for artifacts, retries, and flow state.
+Run selected Metaflow steps in isolated sandboxes — locally or in the cloud — without changing how the rest of your flow works.
 
-## Why Use It
+Decorate a step, pick a backend, and the step runs in a clean VM or container. Artifacts, retries, and `self.*` state pass through unchanged.
 
-- ⚡ Speed + scale: launch sandboxes in milliseconds (`<100ms`) and fan out to thousands of containers.
-- 🔒 Isolation: run tool-heavy or untrusted code without polluting the launcher machine.
-- 📦 Dependency management: keep runtime dependencies consistent across local runs, CI, and remote execution.
-- 🧪 Throughput for evals: run many short-lived agent tasks in parallel for benchmark and regression loops.
-- 🔁 Continuity: keep normal step-to-step state and result passing.
+```python
+from metaflow import FlowSpec, step, boxlite, daytona, e2b
 
-## Quick Start (Daytona) 🚀
+class MyFlow(FlowSpec):
+    @step
+    def start(self):
+        self.data = load_data()
+        self.next(self.process)
+
+    @boxlite          # local VM — no API key needed
+    @step
+    def process(self):
+        import heavy_lib   # safe: isolated from your machine
+        self.result = heavy_lib.run(self.data)
+        self.next(self.end)
+
+    @step
+    def end(self):
+        print(self.result)
+```
+
+## When to Reach for This
+
+**Run tool-heavy or untrusted code without touching your machine.**
+Steps that install system packages, call LLM APIs, or execute agent actions run in a throwaway VM. Your laptop stays clean.
+
+**Fan out evals or agent tasks at scale.**
+`@foreach` spins up a sandbox per branch. Daytona and E2B cold-start in under 150ms, so hundreds of parallel tasks are cheap.
+
+**Iterate locally with real isolation.**
+Use `@boxlite` (KVM/HVF microVM, no cloud account) to get the same sandboxed environment on your laptop before pushing to production. Flip to `@daytona` or `@e2b` by changing one word.
+
+**Keep your existing `@conda` and `@pypi` decorators.**
+Dependencies resolve normally — `metaflow-sandbox` installs them inside the sandbox before the step runs.
+
+## Quick Start
+
+### Local sandbox — no API key (boxlite)
+
+Requires KVM (Linux) or Apple Hypervisor Framework (macOS, M-series).
+
+```bash
+pip install metaflow-sandbox[boxlite] metaflow-local-service
+metaflow-local-service run python my_flow.py run
+```
+
+```python
+from metaflow import FlowSpec, step, boxlite
+
+class Demo(FlowSpec):
+    @step
+    def start(self):
+        self.msg = "hello"
+        self.next(self.remote)
+
+    @boxlite
+    @step
+    def remote(self):
+        self.msg += " from a local VM"
+        self.next(self.end)
+
+    @step
+    def end(self):
+        print(self.msg)
+
+if __name__ == "__main__":
+    Demo()
+```
+
+### Cloud sandbox — Daytona (<100ms cold start)
 
 ```bash
 pip install metaflow-sandbox[daytona] metaflow-local-service
@@ -30,13 +93,6 @@ export AWS_SECRET_ACCESS_KEY=...
 metaflow-local-service run python my_flow.py run
 ```
 
-`metaflow-local-service` starts a metadata service in the background, sets
-`METAFLOW_DEFAULT_METADATA=service`, and runs your command. Run history, task
-IDs, artifacts, and tags are tracked locally in `.metaflow/` — no Postgres required.
-Stop it when you're done with `metaflow-local-service stop`.
-
-Minimal example:
-
 ```python
 from metaflow import FlowSpec, step, daytona
 
@@ -49,7 +105,7 @@ class Demo(FlowSpec):
     @daytona(cpu=1, memory=2048)
     @step
     def remote(self):
-        self.msg = self.msg + " from sandbox"
+        self.msg += " from Daytona"
         self.next(self.end)
 
     @step
@@ -60,21 +116,18 @@ if __name__ == "__main__":
     Demo()
 ```
 
-## R2 / S3-Compatible Setup ☁️
-
-For Cloudflare R2, set:
+### Cloud sandbox — E2B (Firecracker microVM)
 
 ```bash
-export METAFLOW_S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-# optional for R2:
-export AWS_DEFAULT_REGION=auto
+pip install metaflow-sandbox[e2b] metaflow-local-service
+export E2B_API_KEY=...
 ```
 
-## Dependency Hydration in Sandbox 📦
+Replace `@daytona` with `@e2b`. Everything else is identical.
 
-Use your normal Metaflow decorators:
+## Dependencies in the Sandbox
+
+Your `@conda` and `@pypi` decorators work as-is. `metaflow-sandbox` installs them inside the sandbox before your step code runs:
 
 ```python
 @daytona
@@ -93,65 +146,70 @@ def conda_step(self):
     print(self.x, int(np.array([1, 2, 3]).sum()))
 ```
 
-## Backends 🔌
+## Backends
 
-- Daytona: `pip install metaflow-sandbox[daytona]`, use `@daytona`
-- E2B: `pip install metaflow-sandbox[e2b]`, use `@e2b`
-- Generic: `@sandbox(backend="daytona", cpu=2, memory=4096)`
+| Decorator | Install | Requires | Cold start |
+|-----------|---------|----------|------------|
+| `@boxlite` | `metaflow-sandbox[boxlite]` | KVM or HVF (local) | ~1–2s |
+| `@daytona` | `metaflow-sandbox[daytona]` | `DAYTONA_API_KEY` + S3 | <100ms |
+| `@e2b` | `metaflow-sandbox[e2b]` | `E2B_API_KEY` + S3 | ~150ms |
+| `@sandbox` | any of the above | depends on backend | — |
 
-## Configuration 🧭
+`@sandbox(backend="daytona")` is equivalent to `@daytona`. Use it to set the backend at runtime via `METAFLOW_SANDBOX_BACKEND`.
 
-For the full list of decorator parameters, environment variables, defaults, and advanced toggles, see [docs/configuration.md](docs/configuration.md).
+## Configuration
 
-## Metadata tracking 📋
+For decorator parameters, environment variables, and advanced toggles, see [docs/configuration.md](docs/configuration.md).
 
-Metaflow has two metadata modes: `local` (files, no HTTP API) and `service`
-(HTTP API, full run tracking). `metaflow-sandbox` works with both, but `service`
-mode gives you the full experience — heartbeats, tag mutation, resume, and
-`metaflow.Run` queries. [`metaflow-local-service`](https://github.com/npow/metaflow-local-service)
-provides that service without a database.
+**Cloudflare R2 / S3-compatible storage:**
 
-Sandboxes can't reach your machine's localhost directly, so metadata is relayed
-through S3. `metaflow-sandbox` handles this automatically — no extra code needed:
+```bash
+export METAFLOW_S3_ENDPOINT_URL=https://<accountid>.r2.cloudflarestorage.com
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=auto
+```
+
+## Troubleshooting
+
+**Auth error from backend API**
+Set the right key (`DAYTONA_API_KEY`, `E2B_API_KEY`) in the shell that runs the flow.
+
+**`@sandbox` says remote datastore is required**
+Set `METAFLOW_DEFAULT_DATASTORE` and its remote root. `@boxlite` has the same requirement — steps need somewhere to write artifacts.
+
+**Datastore access errors (`403`, missing objects)**
+Check cloud credentials and `METAFLOW_S3_ENDPOINT_URL` if using R2 or a custom S3 endpoint.
+
+**boxlite: "KVM not available" or "HVF not available"**
+On Linux, ensure `/dev/kvm` exists and your user has permission. On macOS, requires Apple Silicon or Intel Mac with Hypervisor.framework (macOS 11+).
+
+## How It Works
+
+`metaflow-sandbox` intercepts the Metaflow step CLI and re-runs the step inside a sandbox. The sandbox gets the code package, runs the step, and writes artifacts to the remote datastore — the same way `@batch` or `@kubernetes` work, but with pluggable VM backends.
+
+**Metadata relay (cloud backends):** Sandboxes can't reach `localhost`, so metadata written during a step is relayed through S3 and replayed to `metaflow-local-service` on your machine. `metaflow-sandbox` handles this automatically.
 
 ```
 Sandbox                           Your machine
 ───────────────                   ─────────────────────────────────
-Step runs with                    metaflow-local-service
-METAFLOW_DEFAULT_METADATA=local   listening on 127.0.0.1
+step runs                         metaflow-local-service
+writes .metaflow/ locally
         │
         ▼
-.metaflow/ written locally
-        │
-        ▼
-sync to S3  ──────────────────►  pull from S3
-                                        │
-                                        ▼
-                                 replay metadata to
-                                 metaflow-local-service
+sync to S3  ──────────────────►  pull from S3 → replay to service
 ```
 
-## Troubleshooting 🛠️
+Architecture details: [docs/architecture.md](docs/architecture.md)
+Adding a backend: [docs/adding-a-backend.md](docs/adding-a-backend.md)
 
-- Symptom: auth error from backend API
-- Fix: set the right key (`DAYTONA_API_KEY` or `E2B_API_KEY`) in the shell that runs the flow.
-
-- Symptom: `@sandbox`/`@daytona` says remote datastore is required
-- Fix: set `METAFLOW_DEFAULT_DATASTORE` and its remote datastore root.
-
-- Symptom: datastore access errors (`403`, missing objects, endpoint errors)
-- Fix: verify cloud credentials and endpoint config (`METAFLOW_S3_ENDPOINT_URL` for R2/custom S3).
-
-## Development 🧪
+## Development
 
 ```bash
 ruff check src/ tests/
 pytest tests/unit/ tests/structural/
-pytest tests/integration/ -m integration
+pytest tests/integration/ -m integration   # needs sandbox API keys
 ```
-
-Architecture details: [docs/architecture.md](docs/architecture.md)  
-Backend interface: [docs/adding-a-backend.md](docs/adding-a-backend.md)
 
 ## License
 

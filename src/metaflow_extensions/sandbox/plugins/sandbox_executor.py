@@ -1,30 +1,28 @@
-"""Sandbox executor — creates a sandbox, uploads code, runs a step.
+"""Sandbox executor — Metaflow integration layer for SandboxRunner.
 
 Layer: Execution (same level as Metaflow Integration)
-May only import from: .backend, .backends (registry), metaflow stdlib
+May only import from: sandrun, .backend, .backends (registry), metaflow stdlib
 
-This is the sandbox equivalent of ``metaflow.plugins.aws.batch.batch.Batch``.
-It builds the full bash command (mflog setup, code download, bootstrap,
-step execution, log save) and runs it inside a sandbox via the backend API.
+This module is the Metaflow-specific wrapper around ``sandrun.SandboxRunner``.
+It handles the Metaflow-specific concerns that SandboxRunner does not:
+
+- mflog structured log capture (export_mflog_env_vars, bash_capture_logs, BASH_SAVE_LOGS)
+- Metaflow environment variable assembly (DEFAULT_METADATA, SERVICE_INTERNAL_URL, config_values)
+- Injectable PackageStager / DepInstaller for backend-native code+dep delivery
+- Backward-compatible fallback to environment.get_package_commands() / bootstrap_commands()
+
+Mirrors ``metaflow.plugins.aws.batch.batch.Batch`` in structure.
 """
 
 from __future__ import annotations
 
-import bz2
-import contextlib
-import io
 import json
 import os
 import shlex
-import shutil
 import sys
-import tarfile
-import tempfile
 import time
-from pathlib import Path
 from typing import Any
 from typing import Callable
-from urllib import request
 
 from metaflow import util
 from metaflow.exception import MetaflowException
@@ -34,10 +32,10 @@ from metaflow.mflog import BASH_SAVE_LOGS
 from metaflow.mflog import bash_capture_logs
 from metaflow.mflog import export_mflog_env_vars
 
-from metaflow_extensions.sandbox.plugins.backend import ExecResult
-from metaflow_extensions.sandbox.plugins.backend import Resources
-from metaflow_extensions.sandbox.plugins.backend import SandboxConfig
-from metaflow_extensions.sandbox.plugins.backends import get_backend
+from sandrun.backend import ExecResult
+from sandrun.backend import Resources
+from sandrun.backend import SandboxConfig
+from sandrun.backends import get_backend
 
 # Redirect structured logs to $PWD/.logs/
 LOGS_DIR = "$PWD/.logs"
@@ -47,8 +45,6 @@ STDOUT_PATH = os.path.join(LOGS_DIR, STDOUT_FILE)
 STDERR_PATH = os.path.join(LOGS_DIR, STDERR_FILE)
 
 # Cloud credential env vars to forward into the sandbox.
-# The sandbox runs on third-party infra with no native IAM integration,
-# so we forward credentials from the local environment.
 _FORWARDED_CREDENTIAL_VARS = [
     # AWS
     "AWS_ACCESS_KEY_ID",
@@ -76,14 +72,12 @@ def _env_flag(name: str) -> bool:
 
 def _debug_settings() -> tuple[bool, str | None, str | None]:
     """
-    Returns:
-      keep_sandbox, dump_script_target, dump_env_target
+    Returns: keep_sandbox, dump_script_target, dump_env_target
 
-    Control:
-      METAFLOW_SANDBOX_DEBUG
-        - 0/false/no/off: disabled
-        - 1/true/yes/on: enable keep + dump script/env to default dir
-        - <path>: enable keep + dump script/env to the given directory/path
+    Control via METAFLOW_SANDBOX_DEBUG:
+      0/false/no/off  — disabled
+      1/true/yes/on   — enable + dump to default dir
+      <path>          — enable + dump to given path
     """
     debug_cfg = os.environ.get("METAFLOW_SANDBOX_DEBUG", "").strip()
     if debug_cfg:
@@ -91,15 +85,11 @@ def _debug_settings() -> tuple[bool, str | None, str | None]:
             return False, None, None
         if debug_cfg.lower() in ("1", "true", "yes", "on"):
             return True, _DEFAULT_DEBUG_DIR, _DEFAULT_DEBUG_DIR
-        # Any other non-empty value is treated as output directory/path.
         return True, debug_cfg, debug_cfg
-
     return False, None, None
 
 
 def _skip_aws_session_token_for_endpoint() -> bool:
-    # R2 static access keys don't require STS session tokens; forwarding one can
-    # break PutObject with InvalidArgument on X-Amz-Security-Token.
     endpoint = (os.environ.get("METAFLOW_S3_ENDPOINT_URL") or "").lower()
     if not endpoint:
         return False
@@ -112,108 +102,6 @@ def _is_cloudflare_r2_endpoint(endpoint: str | None) -> bool:
     return "cloudflarestorage.com" in (endpoint or "").lower()
 
 
-def _target_linux_arch() -> str | None:
-    target = (os.environ.get("METAFLOW_SANDBOX_TARGET_PLATFORM") or "").lower()
-    if "linux-aarch64" in target or "linux-arm64" in target:
-        return "aarch64"
-    if "linux-64" in target or "linux-x86_64" in target or "linux-amd64" in target:
-        return "x86_64"
-    return None
-
-
-def _elf_arch(path: str) -> str | None:
-    try:
-        with open(path, "rb") as f:
-            hdr = f.read(20)
-    except OSError:
-        return None
-    if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
-        return None
-    # EI_DATA byte: 1=little, 2=big endian
-    endianness = "<" if hdr[5] == 1 else ">" if hdr[5] == 2 else None
-    if endianness is None:
-        return None
-    e_machine = int.from_bytes(hdr[18:20], byteorder="little" if endianness == "<" else "big")
-    if e_machine == 62:
-        return "x86_64"
-    if e_machine == 183:
-        return "aarch64"
-    return "unknown"
-
-
-def _is_compatible_linux_micromamba(path: str) -> bool:
-    target_arch = _target_linux_arch()
-    binary_arch = _elf_arch(path)
-    if binary_arch is None:
-        return False
-    if target_arch is None:
-        # If target arch is unknown, allow any Linux ELF micromamba binary.
-        return binary_arch in ("x86_64", "aarch64")
-    return binary_arch == target_arch
-
-
-def _target_micromamba_platform() -> str:
-    target_arch = _target_linux_arch()
-    if target_arch == "aarch64":
-        return "linux-aarch64"
-    return "linux-64"
-
-
-def _auto_download_micromamba() -> str | None:
-    auto_download_cfg = os.environ.get("METAFLOW_SANDBOX_AUTO_DOWNLOAD_MICROMAMBA", "")
-    if auto_download_cfg and not _env_flag("METAFLOW_SANDBOX_AUTO_DOWNLOAD_MICROMAMBA"):
-        return None
-
-    platform_id = _target_micromamba_platform()
-    cache_root = Path(
-        os.environ.get(
-            "METAFLOW_SANDBOX_MICROMAMBA_CACHE_DIR",
-            os.path.join(Path.home(), ".cache", "metaflow-sandbox", "micromamba"),
-        )
-    )
-    final_path = cache_root / platform_id / "micromamba"
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    if final_path.is_file() and _is_compatible_linux_micromamba(str(final_path)):
-        return str(final_path)
-
-    url = f"https://micro.mamba.pm/api/micromamba/{platform_id}/latest"
-    with request.urlopen(url, timeout=30) as resp:
-        payload = resp.read()
-    tar_bytes = bz2.decompress(payload)
-    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
-        member = tf.getmember("bin/micromamba")
-        extracted = tf.extractfile(member)
-        if extracted is None:
-            raise SandboxException("Failed to extract micromamba from download payload.")
-        fd, tmp_name = tempfile.mkstemp(
-            prefix="micromamba.",
-            suffix=".tmp",
-            dir=str(final_path.parent),
-        )
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "wb") as out:
-            shutil.copyfileobj(extracted, out)
-    os.chmod(tmp_path, 0o755)
-    os.replace(tmp_path, final_path)
-    return str(final_path)
-
-
-def _is_hard_minus_one(result: ExecResult) -> bool:
-    if result.exit_code != -1:
-        return False
-    if (result.stdout or "").strip():
-        return False
-    stderr = (result.stderr or "").strip()
-    if not stderr:
-        return True
-    remaining = [
-        line
-        for line in stderr.splitlines()
-        if line.strip() and not line.lstrip().startswith("[daytona-debug]")
-    ]
-    return len(remaining) == 0
-
-
 class SandboxException(MetaflowException):
     headline = "Sandbox execution error"
 
@@ -221,22 +109,37 @@ class SandboxException(MetaflowException):
 class SandboxExecutor:
     """Create a sandbox, ship code, execute a Metaflow step inside it.
 
-    Mirrors the ``Batch`` class from
-    ``metaflow.plugins.aws.batch.batch``. The key difference is that we
-    use the pluggable :class:`SandboxBackend` interface instead of AWS
-    Batch APIs.
+    Mirrors the ``Batch`` class from ``metaflow.plugins.aws.batch.batch``.
+
+    Stager / installer injection
+    ----------------------------
+    Pass a ``sandrun.PackageStager`` to deliver the code package via the
+    backend filesystem API instead of S3.  Pass a ``sandrun.DepInstaller``
+    to install dependencies offline (no-egress safe).
+
+    When neither is provided, the executor falls back to the classic
+    ``environment.get_package_commands()`` / ``environment.bootstrap_commands()``
+    paths (existing S3-based behaviour is preserved).
     """
 
-    def __init__(self, backend_name: str, environment: Any) -> None:
+    def __init__(
+        self,
+        backend_name: str,
+        environment: Any,
+        stager: Any | None = None,
+        installer: Any | None = None,
+    ) -> None:
         self._backend_name = backend_name
         self._environment = environment
+        self._stager = stager        # sandrun.PackageStager | None
+        self._installer = installer  # sandrun.DepInstaller | None
         self._sandbox_id: str | None = None
         self._result: ExecResult | None = None
         self._backend: Any = None
         self._log_streamed: bool = False
 
     # ------------------------------------------------------------------
-    # Command building (mirrors Batch._command)
+    # Command building
     # ------------------------------------------------------------------
 
     def _command(
@@ -252,8 +155,8 @@ class SandboxExecutor:
 
         Structure:
         1. Set mflog environment variables
-        2. Download and extract the code package
-        3. Bootstrap the environment (conda/pypi)
+        2. Set up code package (via stager OR get_package_commands)
+        3. Bootstrap environment (via installer OR bootstrap_commands)
         4. Execute the step with log capture
         5. Save logs and propagate exit code
         """
@@ -263,25 +166,40 @@ class SandboxExecutor:
             stderr_path=STDERR_PATH,
             **task_spec,
         )
-        init_cmds = self._environment.get_package_commands(
-            code_package_url, datastore_type, code_package_metadata
-        )
-        # Avoid creating/running under a directory literally named "metaflow",
-        # which can shadow the installed metaflow package in Python import path.
-        init_cmds = [
-            cmd.replace("mkdir metaflow && cd metaflow", "mkdir mf_sandbox && cd mf_sandbox")
-            for cmd in init_cmds
-        ]
-        init_expr = " && ".join(init_cmds)
-        step_expr = bash_capture_logs(
-            " && ".join(
-                self._environment.bootstrap_commands(step_name, datastore_type)
-                + step_cmds
+
+        # Code package setup — prefer TarballStager; fall back to S3 download.
+        if self._stager is not None:
+            init_cmds = self._stager.setup_commands()
+        else:
+            init_cmds = self._environment.get_package_commands(
+                code_package_url, datastore_type, code_package_metadata
             )
+            # Avoid a directory named "metaflow" that would shadow the package.
+            init_cmds = [
+                cmd.replace(
+                    "mkdir metaflow && cd metaflow", "mkdir mf_sandbox && cd mf_sandbox"
+                )
+                for cmd in init_cmds
+            ]
+
+        init_expr = " && ".join(init_cmds)
+
+        # Dependency bootstrap — prefer offline installer; fall back to bootstrap_commands.
+        if self._installer is not None:
+            bootstrap_cmds = self._installer.setup_commands()
+        else:
+            bootstrap_cmds = self._environment.bootstrap_commands(
+                step_name, datastore_type
+            )
+
+        step_expr = bash_capture_logs(
+            " && ".join(bootstrap_cmds + step_cmds)
         )
 
-        cmd_str = f"true && mkdir -p {LOGS_DIR} && {mflog_expr} && {init_expr} && {step_expr}; "
-        cmd_str += f"c=$?; {BASH_SAVE_LOGS}; exit $c"
+        cmd_str = (
+            f"true && mkdir -p {LOGS_DIR} && {mflog_expr} && {init_expr} && {step_expr}; "
+            f"c=$?; {BASH_SAVE_LOGS}; exit $c"
+        )
 
         # Metaflow's get_package_commands() uses \\" escaping designed for
         # the shlex round-trip in batch.py: shlex.split('bash -c "%s"' % cmd).
@@ -337,23 +255,28 @@ class SandboxExecutor:
 
     @staticmethod
     def _resolve_staged_uploads() -> tuple[list[dict[str, str | None]], bool]:
+        from sandrun._micromamba import auto_download_micromamba
+        from sandrun._micromamba import is_compatible_linux_micromamba
+
         uploads = SandboxExecutor._parse_upload_specs()
         stage_cfg = os.environ.get("METAFLOW_SANDBOX_STAGE_MICROMAMBA", "").lower()
         if stage_cfg in ("0", "false", "no", "off"):
             return uploads, False
         force_stage = stage_cfg in ("1", "true", "yes", "on")
 
+        import shutil
+
         micromamba_path = os.environ.get("METAFLOW_SANDBOX_MICROMAMBA_PATH") or shutil.which(
             "micromamba"
         )
-        compatible = bool(micromamba_path) and _is_compatible_linux_micromamba(
+        compatible = bool(micromamba_path) and is_compatible_linux_micromamba(
             str(micromamba_path)
         )
         auto_download_err: Exception | None = None
         if not compatible:
             try:
-                micromamba_path = _auto_download_micromamba()
-                compatible = bool(micromamba_path) and _is_compatible_linux_micromamba(
+                micromamba_path = auto_download_micromamba()
+                compatible = bool(micromamba_path) and is_compatible_linux_micromamba(
                     str(micromamba_path)
                 )
             except Exception as e:
@@ -456,21 +379,19 @@ class SandboxExecutor:
         if SERVICE_INTERNAL_URL:
             env["METAFLOW_SERVICE_URL"] = SERVICE_INTERNAL_URL
 
-        # Forward datastore-specific configuration from the local env
-        # (e.g. METAFLOW_DATASTORE_SYSROOT_S3, METAFLOW_DATATOOLS_S3ROOT).
         from metaflow.metaflow_config_funcs import config_values
 
         for k, v in config_values():
-            if k.startswith("METAFLOW_DATASTORE_SYSROOT_") or k.startswith(
-                "METAFLOW_DATATOOLS_"
-            ) or k.startswith("METAFLOW_S3") or k.startswith(
-                "METAFLOW_CARD_S3"
-            ) or k.startswith("METAFLOW_CONDA") or k.startswith(
-                "METAFLOW_SERVICE"
+            if (
+                k.startswith("METAFLOW_DATASTORE_SYSROOT_")
+                or k.startswith("METAFLOW_DATATOOLS_")
+                or k.startswith("METAFLOW_S3")
+                or k.startswith("METAFLOW_CARD_S3")
+                or k.startswith("METAFLOW_CONDA")
+                or k.startswith("METAFLOW_SERVICE")
             ):
                 env[k] = v
 
-        # Forward cloud credentials
         skip_aws_session_token = _skip_aws_session_token_for_endpoint()
         for var in _FORWARDED_CREDENTIAL_VARS:
             val = os.environ.get(var)
@@ -479,12 +400,10 @@ class SandboxExecutor:
                     continue
                 env[var] = val
 
-        # User-specified env vars from the decorator
         if sandbox_env:
             env.update(sandbox_env)
 
         # R2 can stall under high parallel S3 fetch fan-out during conda bootstrap.
-        # Apply a conservative default for sandbox workloads unless explicitly set.
         if "METAFLOW_S3_WORKER_COUNT" not in env and _is_cloudflare_r2_endpoint(
             env.get("METAFLOW_S3_ENDPOINT_URL") or os.environ.get("METAFLOW_S3_ENDPOINT_URL")
         ):
@@ -493,16 +412,10 @@ class SandboxExecutor:
             )
 
         if prepend_path:
-            # Sandbox-level PATH must retain standard system locations.
-            # If we overwrite it with only a staged bin directory, some
-            # backends (e.g. Daytona process wrapper) fail to exec shell
-            # commands and return exit_code=-1.
             base_path = env.get("PATH") or os.environ.get(
                 "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             )
-            env["PATH"] = (
-                f"{prepend_path}:{base_path}"
-            )
+            env["PATH"] = f"{prepend_path}:{base_path}"
 
         return env
 
@@ -568,12 +481,16 @@ class SandboxExecutor:
             if staged_uploads:
                 chmod_cmds = self._stage_uploads(self._sandbox_id, staged_uploads)
 
-            # Inject sandbox ID into the script — we can't know the ID
-            # before create(), so we prepend an export to the script.
+            # Deliver code package via stager (backend-native, no S3 required).
+            if self._stager is not None:
+                self._stager.deliver(self._backend, self._sandbox_id)
+
+            # Stage dependency packages via installer (no-egress safe).
+            if self._installer is not None:
+                self._installer.stage(self._backend, self._sandbox_id)
+
             setup_prefix_parts: list[str] = []
             if prepend_bin_dir:
-                # Login shells can reset PATH and drop env-injected entries.
-                # Re-apply staged bin path inside the executed script.
                 setup_prefix_parts.append(
                     f"export PATH={shlex.quote(_STAGING_BIN_DIR)}:$PATH"
                 )
@@ -615,6 +532,8 @@ class SandboxExecutor:
             else:
                 _on_stdout = _on_stderr = None
 
+            from sandrun.runner import _is_hard_minus_one
+
             result = self._backend.exec_script_streaming(
                 self._sandbox_id,
                 run_cmd,
@@ -626,6 +545,8 @@ class SandboxExecutor:
             hard_minus_one = _is_hard_minus_one(result)
             if not hard_minus_one or attempt == attempts - 1:
                 break
+            import contextlib
+
             with contextlib.suppress(Exception):
                 self._backend.destroy(self._sandbox_id)
             self._sandbox_id = None
@@ -637,6 +558,8 @@ class SandboxExecutor:
 
     def cleanup(self) -> None:
         """Destroy the sandbox if it exists. Best-effort, never raises."""
+        import contextlib
+
         keep_debug_sandbox, _, _ = _debug_settings()
         if keep_debug_sandbox:
             return
@@ -657,7 +580,6 @@ class SandboxExecutor:
         if self._result is None:
             raise SandboxException("No result — was launch() called?")
 
-        # Echo buffered output only when streaming didn't already emit it live.
         if not self._log_streamed:
             if self._result.stdout:
                 for line in self._result.stdout.splitlines():

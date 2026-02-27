@@ -64,6 +64,12 @@ class TestExecutorStructure:
     def test_has_wait_method(self, executor_methods: set[str]) -> None:
         assert "wait" in executor_methods
 
+    def test_accepts_stager_and_installer_args(self, executor_methods: set[str]) -> None:
+        """Executor __init__ must accept stager and installer for injection."""
+        source = EXECUTOR_FILE.read_text()
+        assert "stager" in source
+        assert "installer" in source
+
 
 class TestExecutorCommandBuilding:
     """Verify the _command method builds proper bash commands."""
@@ -87,6 +93,16 @@ class TestExecutorCommandBuilding:
     def test_source_preserves_exit_code(self) -> None:
         source = EXECUTOR_FILE.read_text()
         assert "exit $c" in source
+
+    def test_stager_path_bypasses_get_package_commands(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "self._stager.setup_commands()" in source
+        assert "get_package_commands" in source  # fallback path still present
+
+    def test_installer_path_bypasses_bootstrap_commands(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "self._installer.setup_commands()" in source
+        assert "bootstrap_commands" in source  # fallback path still present
 
 
 class TestExecutorEnvVars:
@@ -119,7 +135,7 @@ class TestExecutorEnvVars:
 
     def test_supports_force_local_metadata_flag(self) -> None:
         source = EXECUTOR_FILE.read_text()
-        assert "proxy_service_metadata = DEFAULT_METADATA == \"service\"" in source
+        assert 'proxy_service_metadata = DEFAULT_METADATA == "service"' in source
         assert '"METAFLOW_DEFAULT_METADATA": (' in source
 
     def test_skips_session_token_for_r2_by_default(self) -> None:
@@ -137,13 +153,10 @@ class TestExecutorEnvVars:
     def test_auto_stages_micromamba_with_opt_out(self) -> None:
         source = EXECUTOR_FILE.read_text()
         assert "METAFLOW_SANDBOX_STAGE_MICROMAMBA" in source
-        assert "if stage_cfg in (\"0\", \"false\", \"no\", \"off\")" in source
-        assert "_is_compatible_linux_micromamba" in source
-        assert "_auto_download_micromamba" in source
-        assert "METAFLOW_SANDBOX_AUTO_DOWNLOAD_MICROMAMBA" in source
-        assert "METAFLOW_SANDBOX_MICROMAMBA_CACHE_DIR" in source
-        assert "_elf_arch" in source
-        assert "_target_linux_arch" in source
+        assert 'if stage_cfg in ("0", "false", "no", "off")' in source
+        assert "is_compatible_linux_micromamba" in source
+        assert "auto_download_micromamba" in source
+        assert "METAFLOW_SANDBOX_AUTO_DOWNLOAD_MICROMAMBA" not in source  # moved to sandrun
         assert "optional" in source
 
 
@@ -165,6 +178,14 @@ class TestExecutorLaunch:
     def test_source_uses_get_backend(self) -> None:
         source = EXECUTOR_FILE.read_text()
         assert "get_backend" in source
+
+    def test_source_delivers_stager_after_create(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "self._stager.deliver(self._backend, self._sandbox_id)" in source
+
+    def test_source_stages_installer_after_create(self) -> None:
+        source = EXECUTOR_FILE.read_text()
+        assert "self._installer.stage(self._backend, self._sandbox_id)" in source
 
     def test_source_supports_staged_uploads(self) -> None:
         source = EXECUTOR_FILE.read_text()

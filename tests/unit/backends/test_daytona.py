@@ -26,10 +26,10 @@ def _mock_daytona_module():
 def _make_backend():
     """Create a DaytonaBackend with a mocked client."""
     with patch(
-        "metaflow_extensions.sandbox.plugins.backends.daytona._get_client",
+        "sandrun.backends.daytona._get_client",
         return_value=MagicMock(),
     ):
-        from metaflow_extensions.sandbox.plugins.backends.daytona import DaytonaBackend
+        from sandrun.backends.daytona import DaytonaBackend
 
         backend = DaytonaBackend()
 
@@ -133,7 +133,7 @@ class TestDaytonaBackend:
 
 class TestDaytonaImportError:
     def test_install_hint_contains_pip_command(self) -> None:
-        from metaflow_extensions.sandbox.plugins.backends.daytona import _INSTALL_HINT
+        from sandrun.backends.daytona import _INSTALL_HINT
 
-        assert "pip install metaflow-sandbox[daytona]" in _INSTALL_HINT
+        assert "pip install sandrun[daytona]" in _INSTALL_HINT
         assert "DAYTONA_API_KEY" in _INSTALL_HINT

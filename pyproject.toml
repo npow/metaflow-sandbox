@@ -9,7 +9,10 @@ description = "Run Metaflow steps in isolated cloud sandboxes — instant contai
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
-dependencies = ["metaflow>=2.12"]
+dependencies = [
+    "metaflow>=2.12",
+    "sandrun>=0.1",
+]
 authors = [
     { name = "npow" },
 ]
@@ -51,6 +54,7 @@ Documentation = "https://github.com/npow/metaflow-sandbox/tree/main/docs"
 [project.optional-dependencies]
 daytona = ["daytona>=0.1"]
 e2b = ["e2b-code-interpreter>=1.0"]
+boxlite = ["boxlite[sync]>=0.6"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -60,6 +64,11 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/metaflow_extensions"]
+
+# Development: resolve sandrun from the local packages/ directory.
+# pip install -e packages/sandrun before running tests locally.
+[tool.hatch.envs.default.overrides]
+# Path resolution is handled outside hatch; see packages/sandrun/pyproject.toml.
 
 [tool.ruff]
 src = ["src"]

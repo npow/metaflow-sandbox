@@ -1,7 +1,7 @@
 """Metaflow step decorators for sandbox execution.
 
 Layer: Metaflow Integration
-May only import from: .backend, .backends (registry)
+May only import from: sandrun, .backend, .backends (registry)
 
 Provides ``@sandbox``, ``@daytona``, and ``@e2b`` decorators that execute
 Metaflow steps inside remote sandbox environments. Follows the same
@@ -26,6 +26,7 @@ import os
 import platform
 import sys
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 from typing import ClassVar
 
@@ -40,7 +41,7 @@ _BACKEND_RUNTIME_PYPI_PINS = {
 _SANDBOX_RUNTIME_PYPI_PINS = {
     "requests": ">=2.21.0",
 }
-_SANDBOX_REMOTE_COMMAND_ALIASES = ("sandbox", "daytona", "e2b")
+_SANDBOX_REMOTE_COMMAND_ALIASES = ("sandbox", "daytona", "e2b", "boxlite")
 _BACKEND_AUTH_ENV_VARS = ("DAYTONA_API_KEY", "DAYTONA_API_URL", "E2B_API_KEY")
 _INITIAL_BACKEND_AUTH_ENV = {
     k: v for k, v in ((var, os.environ.get(var)) for var in _BACKEND_AUTH_ENV_VARS) if v
@@ -59,7 +60,13 @@ def _default_target_platform() -> str:
 
 
 def _ensure_conda_remote_command_aliases() -> None:
-    """Ensure nflxext conda remote-command checks include sandbox backends."""
+    """Ensure nflxext conda remote-command checks include sandbox backends.
+
+    ``CONDA_REMOTE_COMMANDS`` in nflx-extensions gates the target-arch
+    selection in ``extract_merged_reqs_for_step``.  Without this patch,
+    sandbox steps would receive a native-arch (macOS) ``ResolvedEnvironment``
+    instead of a ``linux-64`` one.  Must be kept.
+    """
     module_names = (
         "metaflow_extensions.netflix_ext.plugins.conda.conda_environment",
         "metaflow_extensions.netflix_ext.plugins.conda.conda_step_decorator",
@@ -72,6 +79,59 @@ def _ensure_conda_remote_command_aliases() -> None:
         current = tuple(getattr(module, "CONDA_REMOTE_COMMANDS", ()))
         merged = tuple(dict.fromkeys([*current, *_SANDBOX_REMOTE_COMMAND_ALIASES]))
         module.CONDA_REMOTE_COMMANDS = merged
+
+
+def _get_resolved_package_specs(
+    environment: Any,
+    flow: Any,
+    datastore_type: str,
+    step_name: str,
+) -> tuple[list[Any], str]:
+    """Return (PackageSpec list, target_arch) from a nflx CondaEnvironment.
+
+    Returns an empty list when nflx-extensions is not installed or the
+    step has no conda/pypi dependencies.  The caller falls back to the
+    classic ``bootstrap_commands()`` path in that case.
+    """
+    try:
+        from metaflow_extensions.netflix_ext.plugins.conda.conda_environment import (
+            CondaEnvironment,
+        )
+    except ImportError:
+        return [], "linux-64"
+
+    if not isinstance(environment, CondaEnvironment) or environment.conda is None:
+        return [], "linux-64"
+
+    try:
+        _, arch, _, resolved_env = CondaEnvironment.extract_merged_reqs_for_step(
+            environment.conda,
+            flow,
+            datastore_type,
+            step_name,
+        )
+    except Exception:
+        return [], "linux-64"
+
+    if resolved_env is None:
+        return [], arch or "linux-64"
+
+    from sandrun._types import PackageSpec
+
+    specs = [
+        PackageSpec(
+            url=spec.url,
+            filename=spec.filename,
+            pkg_type=spec.TYPE,
+            hashes=dict(spec.pkg_hashes),
+            is_real_url=getattr(spec, "is_real_url", True),
+            url_format=getattr(spec, "url_format", "") or "",
+            environment_marker=getattr(spec, "environment_marker", None),
+        )
+        for spec in resolved_env.packages
+        if getattr(spec, "is_real_url", True)
+    ]
+    return specs, arch or "linux-64"
 
 
 class SandboxException(MetaflowException):
@@ -104,9 +164,14 @@ class SandboxDecorator(StepDecorator):
 
     # Class-level code-package state (shared across all instances,
     # uploaded once per flow run — same pattern as BatchDecorator).
-    package_metadata = None
-    package_url = None
-    package_sha = None
+    package_metadata: ClassVar[str | None] = None
+    package_url: ClassVar[str | None] = None
+    package_sha: ClassVar[str | None] = None
+    package_local_path: ClassVar[str | None] = None
+
+    # Class-level dep-staging state: step_name -> staging_dir path.
+    # Populated by _prepare_deps_once() in runtime_task_created.
+    _prepared_deps: ClassVar[dict[str, str]] = {}
 
     def step_init(
         self,
@@ -135,8 +200,6 @@ class SandboxDecorator(StepDecorator):
         conda_deco = next((d for d in decorators if d.name == "conda"), None)
         pypi_deco = next((d for d in decorators if d.name == "pypi"), None)
 
-        # If a step uses @pypi and runs in a sandbox backend, ensure the backend SDK
-        # is part of the resolved PyPI environment for that step.
         runtime_pin = _BACKEND_RUNTIME_PYPI_PINS.get(self._backend_name)
         if runtime_pin and pypi_deco is not None:
             for package_name, version_spec in _SANDBOX_RUNTIME_PYPI_PINS.items():
@@ -148,8 +211,6 @@ class SandboxDecorator(StepDecorator):
                 package_name, version_spec
             )
         elif runtime_pin and conda_deco is not None:
-            # Netflix @conda supports pip_packages; inject runtime deps there
-            # so sandbox backends work without requiring users to specify them.
             for package_name, version_spec in _SANDBOX_RUNTIME_PYPI_PINS.items():
                 conda_deco.attributes.setdefault("pip_packages", {}).setdefault(
                     package_name, version_spec
@@ -160,14 +221,15 @@ class SandboxDecorator(StepDecorator):
             )
 
         # Preserve backend auth env vars through step-runtime transitions.
-        # These are consumed by sandbox_cli *before* sandbox env injection.
         for var in _BACKEND_AUTH_ENV_VARS:
             val = os.environ.get(var)
             if val:
                 self.attributes["env"].setdefault(var, val)
 
-        # Sandbox backends require a remote datastore — the sandbox
-        # cannot access the local filesystem.
+        # Sandbox backends require a remote datastore for Metaflow artifacts
+        # (steps write outputs to the datastore).  Code package delivery no
+        # longer requires S3 (TarballStager delivers via backend.upload()),
+        # but artifact persistence still does.
         if flow_datastore.TYPE == "local":
             raise SandboxException(
                 f"@{self.name} requires a remote datastore (s3, azure, gs). "
@@ -191,9 +253,46 @@ class SandboxDecorator(StepDecorator):
         is_cloned: bool,
         ubf_context: Any,
     ) -> None:
-        """Upload the code package once (class-level) per flow run."""
+        """Upload the code package and prepare dep staging (once per step)."""
         if not is_cloned:
             self._save_package_once(self.flow_datastore, self.package)
+            self._prepare_deps_once(self._step_name)
+
+    def _prepare_deps_once(self, step_name: str) -> None:
+        """Download + locally stage dep packages for *step_name*.
+
+        Keyed by step name so each step's unique conda environment is
+        handled independently.  Idempotent — subsequent calls for the
+        same step (e.g. foreach tasks) reuse the existing staging dir.
+        """
+        if step_name in SandboxDecorator._prepared_deps:
+            return
+
+        specs, target_arch = _get_resolved_package_specs(
+            self.environment,
+            self.flow,
+            self.flow_datastore.TYPE,
+            step_name,
+        )
+        if not specs:
+            return
+
+        from sandrun.installer import CondaOfflineInstaller
+
+        installer = CondaOfflineInstaller()
+        try:
+            installer.prepare(specs, target_arch)
+        except Exception as e:
+            # Dep preparation failures are non-fatal — fall back to bootstrap_commands().
+            self.logger(
+                f"[sandbox] Offline dep staging failed for step '{step_name}': {e}. "
+                "Falling back to bootstrap_commands().",
+                head="",
+                bad=False,
+            )
+            return
+
+        SandboxDecorator._prepared_deps[step_name] = installer._staging_dir
 
     def runtime_step_cli(
         self,
@@ -202,14 +301,7 @@ class SandboxDecorator(StepDecorator):
         max_user_code_retries: int,
         ubf_context: Any,
     ) -> None:
-        """Redirect execution through ``sandbox step`` CLI command.
-
-        After all user-code retries are exhausted Metaflow may fall back
-        to local execution (e.g. ``@catch``), so we only redirect while
-        ``retry_count <= max_user_code_retries``.
-        """
-        # Prevent recursive sandbox-in-sandbox routing when already running
-        # inside a sandbox workload.
+        """Redirect execution through ``sandbox step`` CLI command."""
         if os.environ.get("METAFLOW_SANDBOX_WORKLOAD"):
             return
 
@@ -218,8 +310,6 @@ class SandboxDecorator(StepDecorator):
             cli_args.command_args.append(self.package_metadata)
             cli_args.command_args.append(self.package_sha)
             cli_args.command_args.append(self.package_url)
-            # Skip dict-valued attributes — they can't be serialized as
-            # CLI options. User env vars are passed via --env-var instead.
             _skip_keys = {"env"}
             cli_args.command_options.update(
                 {k: v for k, v in self.attributes.items() if k not in _skip_keys}
@@ -240,6 +330,18 @@ class SandboxDecorator(StepDecorator):
                 cli_args.command_options["env-var"] = [
                     f"{k}={v}" for k, v in user_env.items()
                 ]
+
+            # Pass code-package local path for TarballStager delivery.
+            if SandboxDecorator.package_local_path:
+                cli_args.command_options[
+                    "code-package-local-path"
+                ] = SandboxDecorator.package_local_path
+
+            # Pass dep staging dir for offline DepInstaller.
+            staging_dir = SandboxDecorator._prepared_deps.get(self._step_name)
+            if staging_dir:
+                cli_args.command_options["deps-staging-dir"] = staging_dir
+
             cli_args.entrypoint[0] = sys.executable
 
     def task_pre_step(
@@ -302,13 +404,37 @@ class SandboxDecorator(StepDecorator):
 
     @classmethod
     def _save_package_once(cls, flow_datastore: Any, package: Any) -> None:
-        """Upload code package to remote datastore (once per flow run).
+        """Upload code package to remote datastore and save a local copy.
 
         Always stores on ``SandboxDecorator`` (the base class) so that
         subclasses (DaytonaDecorator, E2BDecorator) share one upload
         even if a flow mixes backends across steps.
+
+        Local copy (package_local_path) enables TarballStager to deliver
+        the code package via backend.upload() without requiring S3.
         """
         if SandboxDecorator.package_url is None:
+            import tempfile
+
+            # Save locally for TarballStager delivery.
+            fd, local_path = tempfile.mkstemp(suffix=".tar", prefix="mf-sandbox-code-")
+            try:
+                import os
+
+                with os.fdopen(fd, "wb") as f:
+                    f.write(package.blob)
+            except Exception:
+                import os
+
+                try:
+                    os.unlink(local_path)
+                except OSError:
+                    pass
+                raise
+            SandboxDecorator.package_local_path = local_path
+
+            # Also upload to the remote datastore (for bootstrap_commands fallback
+            # and Metaflow's internal bookkeeping).
             url, sha = flow_datastore.save_data(
                 [package.blob], len_hint=1
             )[0]
@@ -334,4 +460,18 @@ class E2BDecorator(SandboxDecorator):
     defaults: ClassVar[dict[str, Any]] = {
         **SandboxDecorator.defaults,
         "backend": "e2b",
+    }
+
+
+class BoxliteDecorator(SandboxDecorator):
+    """Shorthand: @boxlite is equivalent to @sandbox(backend="boxlite").
+
+    Runs the step in a local microVM via boxlite (KVM on Linux, HVF on macOS).
+    No cloud account or API key required.
+    """
+
+    name = "boxlite"
+    defaults: ClassVar[dict[str, Any]] = {
+        **SandboxDecorator.defaults,
+        "backend": "boxlite",
     }

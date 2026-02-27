@@ -131,6 +131,78 @@ class TestClassLevelPackageState:
 
     def test_has_class_level_package_vars(self) -> None:
         source = DECORATOR_FILE.read_text()
-        assert "package_metadata = None" in source
-        assert "package_url = None" in source
-        assert "package_sha = None" in source
+        assert "package_metadata" in source
+        assert "package_url" in source
+        assert "package_sha" in source
+
+    def test_has_class_level_package_local_path(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "package_local_path" in source
+
+    def test_save_package_once_saves_locally(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "package_local_path" in source
+        assert "tempfile" in source
+        assert "package.blob" in source
+
+    def test_has_class_level_prepared_deps(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "_prepared_deps" in source
+
+
+class TestDepInstallerWiring:
+    """Verify dep installer preparation and CLI option injection."""
+
+    def test_has_prepare_deps_once_method(self) -> None:
+        tree = ast.parse(DECORATOR_FILE.read_text())
+        methods: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "SandboxDecorator":
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+        assert "_prepare_deps_once" in methods
+
+    def test_prepare_deps_once_called_from_runtime_task_created(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "_prepare_deps_once" in source
+        assert "runtime_task_created" in source
+
+    def test_source_uses_conda_offline_installer(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "CondaOfflineInstaller" in source
+
+    def test_source_calls_installer_prepare(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "installer.prepare" in source
+
+    def test_prepare_deps_keyed_by_step_name(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "_prepared_deps" in source
+        assert "step_name" in source
+
+    def test_prep_failure_is_nonfatal(self) -> None:
+        """Dep preparation failures must be non-fatal — fall back to bootstrap."""
+        source = DECORATOR_FILE.read_text()
+        # Exception caught and logged, not re-raised
+        assert "Falling back to bootstrap_commands" in source
+
+    def test_runtime_step_cli_passes_deps_staging_dir(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "deps-staging-dir" in source
+
+    def test_runtime_step_cli_passes_code_package_local_path(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "code-package-local-path" in source
+
+    def test_source_calls_get_resolved_package_specs(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "_get_resolved_package_specs" in source
+
+    def test_get_resolved_package_specs_uses_extract_merged_reqs(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "extract_merged_reqs_for_step" in source
+
+    def test_get_resolved_package_specs_converts_to_package_spec(self) -> None:
+        source = DECORATOR_FILE.read_text()
+        assert "PackageSpec" in source

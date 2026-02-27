@@ -9,6 +9,7 @@ STEP_DECORATORS_DESC = [
     ("sandbox", ".sandbox_decorator.SandboxDecorator"),
     ("daytona", ".sandbox_decorator.DaytonaDecorator"),
     ("e2b", ".sandbox_decorator.E2BDecorator"),
+    ("boxlite", ".sandbox_decorator.BoxliteDecorator"),
 ]
 
 CLIS_DESC = [

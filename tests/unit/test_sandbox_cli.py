@@ -42,3 +42,39 @@ def test_forces_local_metadata_inside_service_mode() -> None:
     source = CLI_FILE.read_text()
     assert 'if ctx.obj.metadata.TYPE == "service":' in source
     assert 'top_params["metadata"] = "local"' in source
+
+
+def test_has_code_package_local_path_option() -> None:
+    source = CLI_FILE.read_text()
+    assert "--code-package-local-path" in source
+
+
+def test_has_deps_staging_dir_option() -> None:
+    source = CLI_FILE.read_text()
+    assert "--deps-staging-dir" in source
+
+
+def test_creates_tarball_stager_from_local_path() -> None:
+    source = CLI_FILE.read_text()
+    assert "TarballStager" in source
+    assert "code_package_local_path" in source
+
+
+def test_creates_conda_offline_installer_from_staged() -> None:
+    source = CLI_FILE.read_text()
+    assert "CondaOfflineInstaller" in source
+    assert "from_staged" in source
+    assert "deps_staging_dir" in source
+
+
+def test_installer_load_failure_is_nonfatal() -> None:
+    """CondaOfflineInstaller load failure must be caught and logged."""
+    source = CLI_FILE.read_text()
+    assert "Failed to load dep installer" in source
+    assert "Falling back to bootstrap_commands" in source
+
+
+def test_passes_stager_and_installer_to_executor() -> None:
+    source = CLI_FILE.read_text()
+    assert "stager=stager" in source
+    assert "installer=installer" in source

@@ -1,47 +1,14 @@
-"""Sandbox backend registry.
+"""Sandbox backend registry — re-exported from sandrun.
 
 Layer: Backend Resolution
-May only import from: .backend (ABC), concrete backend modules
+May only import from: sandrun.backends
 
-Backends are resolved lazily — the SDK for a provider is only
-imported when that backend is actually used. This keeps
-`pip install metaflow-sandbox` lightweight.
+This module re-exports the registry from ``sandrun.backends`` so that
+existing imports from ``metaflow_extensions.sandbox.plugins.backends``
+continue to work without modification.
 """
 
-from __future__ import annotations
+from sandrun.backends import _BACKENDS as _BACKENDS
+from sandrun.backends import get_backend as get_backend
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from metaflow_extensions.sandbox.plugins.backend import SandboxBackend
-
-# Registry of backend name -> module path + class name.
-# Add new backends here.
-_BACKENDS: dict[str, tuple[str, str]] = {
-    "daytona": (".daytona", "DaytonaBackend"),
-    "e2b": (".e2b", "E2BBackend"),
-}
-
-
-def get_backend(name: str) -> SandboxBackend:
-    """Resolve a backend by name with lazy import.
-
-    Raises a helpful error if the backend's SDK is not installed,
-    following the "linter errors as teaching" pattern — every
-    failure message tells you exactly how to fix it.
-    """
-    if name not in _BACKENDS:
-        available = ", ".join(sorted(_BACKENDS))
-        raise ValueError(
-            f"Unknown sandbox backend '{name}'. "
-            f"Available backends: {available}. "
-            f"To add a new backend, see docs/adding-a-backend.md"
-        )
-
-    module_path, class_name = _BACKENDS[name]
-
-    import importlib
-
-    module = importlib.import_module(module_path, package=__name__)
-    cls = getattr(module, class_name)
-    return cls()
+__all__ = ["_BACKENDS", "get_backend"]
