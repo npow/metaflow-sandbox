@@ -14,11 +14,16 @@ from sandrun.backend import SandboxConfig
 
 
 def _make_backend():
-    """Create a BoxliteBackend with a mocked SyncSimpleBox class."""
-    with patch.dict(
-        "sys.modules",
-        {"boxlite": MagicMock(), "boxlite.sync_api": MagicMock()},
-    ), patch("sandrun.backends.boxlite._get_sync_simplebox") as mock_get:
+    """Create a BoxliteBackend with a mocked SyncSimpleBox class.
+
+    Uses only patch() (not patch.dict on sys.modules) so that
+    sandrun.backends.boxlite stays cached in sys.modules after this function
+    returns.  That keeps module identity stable for subsequent patch() calls in
+    each test — if the module were evicted from sys.modules, a later patch()
+    would re-import it and the BoxliteBackend instance's __globals__ would
+    point to the old module object, making patches invisible to method calls.
+    """
+    with patch("sandrun.backends.boxlite._get_sync_simplebox") as mock_get:
         mock_cls = MagicMock()
         mock_get.return_value = mock_cls
 

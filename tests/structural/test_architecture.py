@@ -20,14 +20,9 @@ import pytest
 from sandrun.backend import SandboxBackend
 from sandrun.backends import _BACKENDS
 
-SANDRUN_BACKENDS_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "packages"
-    / "sandrun"
-    / "src"
-    / "sandrun"
-    / "backends"
-)
+import sandrun.backends as _sandrun_backends_pkg
+
+SANDRUN_BACKENDS_DIR = Path(_sandrun_backends_pkg.__file__).resolve().parent
 
 # metaflow-sandbox re-exports from sandrun; structural tests check both layers.
 MF_PLUGINS_DIR = (
