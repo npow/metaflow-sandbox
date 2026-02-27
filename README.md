@@ -111,13 +111,11 @@ mode gives you the full experience — heartbeats, tag mutation, resume, and
 `metaflow.Run` queries. [`metaflow-local-service`](https://github.com/npow/metaflow-local-service)
 provides that service without a database.
 
-### Daytona (no egress)
-
-Daytona sandboxes can't reach the coordinator's network, so the metadata relay
-goes through S3:
+Sandboxes can't reach your machine's localhost directly, so metadata is relayed
+through S3. `metaflow-sandbox` handles this automatically — no extra code needed:
 
 ```
-Daytona sandbox                   Your machine
+Sandbox                           Your machine
 ───────────────                   ─────────────────────────────────
 Step runs with                    metaflow-local-service
 METAFLOW_DEFAULT_METADATA=local   listening on 127.0.0.1
@@ -132,15 +130,6 @@ sync to S3  ──────────────────►  pull from
                                  replay metadata to
                                  metaflow-local-service
 ```
-
-This relay is handled automatically by `metaflow-sandbox` — no extra code
-needed. `metaflow-local-service` is just the destination on your machine.
-
-### E2B (has egress)
-
-E2B sandboxes have internet access but can't reach your laptop's localhost.
-Rather than setting up a tunnel with authentication, use the same S3 relay as
-Daytona — it works identically and requires no extra infrastructure.
 
 ## Troubleshooting 🛠️
 
