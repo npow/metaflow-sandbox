@@ -6,7 +6,6 @@ Mocks the boxlite SDK so no KVM/HVF or credentials are needed.
 from __future__ import annotations
 
 from unittest.mock import MagicMock
-from unittest.mock import call
 from unittest.mock import patch
 
 from sandrun.backend import ExecResult

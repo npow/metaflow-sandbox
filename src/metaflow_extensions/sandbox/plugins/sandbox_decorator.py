@@ -22,11 +22,11 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import sys
 from importlib import import_module
-from pathlib import Path
 from typing import Any
 from typing import ClassVar
 
@@ -94,9 +94,7 @@ def _get_resolved_package_specs(
     classic ``bootstrap_commands()`` path in that case.
     """
     try:
-        from metaflow_extensions.netflix_ext.plugins.conda.conda_environment import (
-            CondaEnvironment,
-        )
+        from metaflow_extensions.netflix_ext.plugins.conda.conda_environment import CondaEnvironment
     except ImportError:
         return [], "linux-64"
 
@@ -426,10 +424,8 @@ class SandboxDecorator(StepDecorator):
             except Exception:
                 import os
 
-                try:
+                with contextlib.suppress(OSError):
                     os.unlink(local_path)
-                except OSError:
-                    pass
                 raise
             SandboxDecorator.package_local_path = local_path
 

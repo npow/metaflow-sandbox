@@ -15,12 +15,11 @@ import inspect
 from pathlib import Path
 
 import pytest
+import sandrun.backends as _sandrun_backends_pkg
 
 # sandrun is the canonical home for SandboxBackend and the backend implementations.
 from sandrun.backend import SandboxBackend
 from sandrun.backends import _BACKENDS
-
-import sandrun.backends as _sandrun_backends_pkg
 
 SANDRUN_BACKENDS_DIR = Path(_sandrun_backends_pkg.__file__).resolve().parent
 

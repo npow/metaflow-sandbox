@@ -31,7 +31,6 @@ from metaflow.metaflow_config import SERVICE_INTERNAL_URL
 from metaflow.mflog import BASH_SAVE_LOGS
 from metaflow.mflog import bash_capture_logs
 from metaflow.mflog import export_mflog_env_vars
-
 from sandrun.backend import ExecResult
 from sandrun.backend import Resources
 from sandrun.backend import SandboxConfig
