@@ -4,7 +4,7 @@
 [![Publish](https://github.com/npow/metaflow-sandbox/actions/workflows/publish.yml/badge.svg)](https://github.com/npow/metaflow-sandbox/actions/workflows/publish.yml)
 [![PyPI version](https://img.shields.io/pypi/v/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
 [![Python](https://img.shields.io/pypi/pyversions/metaflow-sandbox.svg)](https://pypi.org/project/metaflow-sandbox/)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Docs](https://img.shields.io/badge/docs-mintlify-18a34a?style=flat-square)](https://mintlify.com/npow/metaflow-sandbox)
 
 Run selected Metaflow steps in isolated sandboxes — locally or in the cloud — without changing how the rest of your flow works.
 
